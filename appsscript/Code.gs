@@ -353,7 +353,8 @@ function orderSaveDraft(req){allowOrder();const a=getActor(req,'customer');retur
  for(const b of boxes){if(!existing.some(x=>String(x.pricingId)===String(b.pricingId))&&Number(b.quantity)>0)put('Order_Boxes',{id:uid('OB'),orderId:o.id,pricingId:String(b.pricingId),quantity:Number(b.quantity)});}
  const next=change('Orders',o.id,{type,listCount,updatedAt:stamp()});audit(a.customerId,'order.saveDraft','Orders',o.id,null,{type,listCount,boxes},'');refreshOrderStatus(next);return {saved:true};});}
 function orderUploadsFolder(){let id=prop('ORDER_PDF_FOLDER_ID');if(id){try{return DriveApp.getFolderById(id);}catch(e){}}
- const f=DriveApp.createFolder('Jay Ganesh Agency – Order PDF lists (private)');PropertiesService.getScriptProperties().setProperties({ORDER_PDF_FOLDER_ID:f.getId()});return f;}
+ try{const f=DriveApp.createFolder('Jay Ganesh Agency – Order PDF lists (private)');PropertiesService.getScriptProperties().setProperties({ORDER_PDF_FOLDER_ID:f.getId()});return f;}
+ catch(e){fail('Google Drive is not connected to your Apps Script yet. In Apps Script: update appsscript.json, run setupOrderUploads and click Allow, then Deploy → New version.','SETUP');}}
 function orderUpload(req){allowOrder();const a=getActor(req,'customer');
  const b64=String(req.fileBase64||'');if(!b64||b64.length>4200000)fail('PDF must be smaller than 3 MB');
  let bytes;try{bytes=Utilities.base64Decode(b64);}catch(e){fail('A valid PDF file is required');}

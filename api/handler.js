@@ -14,9 +14,9 @@ function validOrigin(req){const origin=req.headers.origin;if(!origin)return fals
 function validConfig(){const url=process.env.GAS_WEB_APP_URL||'';return /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url)&&String(process.env.GAS_SHARED_SECRET||'').length>=32&&String(process.env.SESSION_SECRET||'').length>=32;}
 async function callAppsScript(action,args={},actor=null){const payload={action,...args,sharedSecret:process.env.GAS_SHARED_SECRET};if(actor)payload.actor={role:actor.role,mobile:actor.mobile,customerId:actor.customerId||'',authRev:actor.authRev};
   const r=await fetch(process.env.GAS_WEB_APP_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload),redirect:'follow',signal:AbortSignal.timeout(25000)});
-  if(!r.ok)throw Object.assign(new Error('Apps Script unavailable; check deployment permissions'),{status:502});
+  if(!r.ok)throw Object.assign(new Error(action==='order.upload'?'Google Drive is not connected to your Apps Script yet. In Apps Script: update appsscript.json, run setupOrderUploads and click Allow, then Deploy → New version.':'Apps Script unavailable; check deployment permissions'),{status:502,expose:action==='order.upload'});
   const content=await r.text();if(content.length>500000)throw Object.assign(new Error('Backend response too large'),{status:502});
-  let result;try{result=JSON.parse(content)}catch{throw Object.assign(new Error('Apps Script returned HTML instead of JSON. Check Web app URL and access settings.'),{status:502})}
+  let result;try{result=JSON.parse(content)}catch{const needsAuth=/authori[sz]|permission/i.test(content);throw Object.assign(new Error(needsAuth?'Google Drive is not connected to your Apps Script yet. In Apps Script: update appsscript.json, run setupOrderUploads and click Allow, then Deploy → New version.':'Apps Script returned HTML instead of JSON. Check Web app URL and access settings.'),{status:502,expose:needsAuth})}
   if(!result.ok)throw Object.assign(new Error(result.error||'Backend operation failed'),{status:codeStatus[result.code]||502});return result.data;
 }
 export default async function handler(req,res){
@@ -41,5 +41,5 @@ export default async function handler(req,res){
       return json(res,200,{role:data.role,customerId:data.customerId||'',mustChangePin:!!data.mustChangePin});
     }
     return json(res,200,data);
-  }catch(err){const s=err.status||((err instanceof SyntaxError)?400:502);const msg=s===502?'Connection failed. Verify Apps Script deployment and try again.':err.message;return json(res,s,{error:msg});}
+  }catch(err){const s=err.status||((err instanceof SyntaxError)?400:502);const msg=s===502&&!err.expose?'Connection failed. Verify Apps Script deployment and try again.':err.message;return json(res,s,{error:msg});}
 }
