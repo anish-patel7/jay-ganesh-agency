@@ -354,7 +354,7 @@ function orderSaveDraft(req){allowOrder();const a=getActor(req,'customer');retur
  const next=change('Orders',o.id,{type,listCount,updatedAt:stamp()});audit(a.customerId,'order.saveDraft','Orders',o.id,null,{type,listCount,boxes},'');refreshOrderStatus(next);return {saved:true};});}
 function orderUploadsFolder(){let id=prop('ORDER_PDF_FOLDER_ID');if(id){try{return DriveApp.getFolderById(id);}catch(e){}}
  try{const f=DriveApp.createFolder('Jay Ganesh Agency – Order PDF lists (private)');PropertiesService.getScriptProperties().setProperties({ORDER_PDF_FOLDER_ID:f.getId()});return f;}
- catch(e){fail('Google Drive is not connected to your Apps Script yet. In Apps Script: update appsscript.json, run setupOrderUploads and click Allow, then Deploy → New version.','SETUP');}}
+ catch(e){fail('Google Drive is not connected to your Apps Script yet ('+String(e&&e.message||e).slice(0,160)+'). Ask Main Admin to run setupOrderUploads in Apps Script and deploy a new version.','SETUP');}}
 function orderUpload(req){allowOrder();const a=getActor(req,'customer');
  const b64=String(req.fileBase64||'');if(!b64||b64.length>4200000)fail('PDF must be smaller than 3 MB');
  let bytes;try{bytes=Utilities.base64Decode(b64);}catch(e){fail('A valid PDF file is required');}
@@ -389,7 +389,14 @@ function adminApproveOrder(req){getActor(req,'admin');return locked(()=>{const o
  change('Orders',o.id,{status:'Finalized',financialStatus:'Approved',updatedAt:stamp()});audit('admin','order.approve','Orders',o.id,{status:'Locked'},{status:'Finalized'},safe(req.reason,200));return {status:'Finalized'};});}
 /** Run ONCE from the Apps Script editor after this update: grants Google Drive
  * permission and creates the private folder for customers' PDF lists. */
-function setupOrderUploads(){const f=orderUploadsFolder();console.log('Order PDF folder ready: '+f.getName()+' ('+f.getUrl()+')');}
+function setupOrderUploads(){
+ // Calls Drive directly (no wrapper) so Google shows the real reason and the permission prompt.
+ let f;try{const id=prop('ORDER_PDF_FOLDER_ID');if(id){try{f=DriveApp.getFolderById(id);}catch(e){}}
+  if(!f){f=DriveApp.createFolder('Jay Ganesh Agency – Order PDF lists (private)');PropertiesService.getScriptProperties().setProperties({ORDER_PDF_FOLDER_ID:f.getId()});}}
+ catch(e){const m=String(e&&e.message||e);
+  throw new Error('Google Drive permission is missing. Google says: '+m+'\n\nFIX: Project Settings (gear) → tick "Show appsscript.json manifest file in editor" → open appsscript.json → make "oauthScopes" contain "https://www.googleapis.com/auth/drive" → Save → run setupOrderUploads again and click Allow.');}
+ console.log('OK: order PDF folder ready: '+f.getName()+' — '+f.getUrl()+'\nNow Deploy → Manage deployments → Edit → Version: New version → Deploy.');
+}
 function doGet(){return ContentService.createTextOutput('Jay Ganesh Agency data gateway. No public access.');}
 function doPost(e){let answer;try{const req=JSON.parse(e&&e.postData&&e.postData.contents||'{}');const expected=prop('API_SHARED_SECRET');if(!expected||expected.length<32||!equals(req.sharedSecret,expected))fail('Unauthorized','UNAUTHORIZED');answer={ok:true,data:run(String(req.action||''),req)};}catch(err){const allowed=['UNAUTHORIZED','BAD_REQUEST','FORBIDDEN','CONFLICT','CLOSED','NOT_FOUND','RATE_LIMIT','SETUP','PIN_CHANGE_REQUIRED'];const code=allowed.includes(err.code)?err.code:'SERVER_ERROR';if(code==='SERVER_ERROR')console.error('JGA internal error',err&&err.stack||err);answer={ok:false,error:code==='SERVER_ERROR'?'Service error; contact administrator':err.message,code};}return ContentService.createTextOutput(JSON.stringify(answer)).setMimeType(ContentService.MimeType.JSON);}
 /** Run from Apps Script editor ONCE after setting Script Properties. */
