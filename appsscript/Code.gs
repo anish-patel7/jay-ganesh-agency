@@ -66,8 +66,9 @@ function siteSettings(){
  const registrationEnabled=enabled('registrationEnabled',legacyEnabled);
  const paymentEntriesEnabled=enabled('paymentEntriesEnabled',legacyEnabled);
  const groupCollectionsEnabled=enabled('groupCollectionsEnabled',legacyEnabled);
- const registrationWithinDates=openWindow('2026-11-09','2026-11-30');
- const paymentWithinDates=openWindow('2026-11-09','2027-07-31');
+ // No fixed date windows: Main Admin's Live/Stop switches decide (with policy approvals).
+ const registrationWithinDates=true;
+ const paymentWithinDates=true;
  return {
   registrationTermsConfirmed:rTerms,paymentPolicyConfirmed:pPolicy,
   registrationEnabled,paymentEntriesEnabled,groupCollectionsEnabled,
@@ -75,12 +76,12 @@ function siteSettings(){
   registrationOpen:rTerms&&registrationEnabled&&registrationWithinDates,
   paymentEntriesOpen:pPolicy&&paymentEntriesEnabled&&paymentWithinDates,
   groupCollectionsOpen:pPolicy&&groupCollectionsEnabled,
-  registrationWindow:'09 Nov – 30 Nov 2026',paymentWindow:'09 Nov 2026 – 31 Jul 2027',
+  registrationWindow:'Controlled by Main Admin',paymentWindow:'Controlled by Main Admin',
   ordersEnabled:false,refundsEnabled:false,fireworksLegalClearance:prop('FIREWORKS_LEGAL_CLEARANCE')==='true'
  };
 }
-function allowRegistration(){const s=siteSettings();if(!s.registrationOpen)fail('Registration currently closed. Ask Main Admin to review Settings and the registration date window.','CLOSED');}
-function allowPayment(){const s=siteSettings();if(!s.paymentEntriesOpen)fail('Payment submissions currently closed. Ask Main Admin to review Settings and the payment date window.','CLOSED');}
+function allowRegistration(){const s=siteSettings();if(!s.registrationOpen)fail('Registration currently closed. Main Admin has stopped registration.','CLOSED');}
+function allowPayment(){const s=siteSettings();if(!s.paymentEntriesOpen)fail('Payment submissions currently closed. Main Admin has stopped payment entries.','CLOSED');}
 function allowGroupCollection(){if(!siteSettings().groupCollectionsOpen)fail('Group collection processing currently paused by Main Admin','CLOSED');}
 function adminSettings(req){getActor(req,'admin');return siteSettings();}
 function updateAdminSetting(req){getActor(req,'admin');
