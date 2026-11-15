@@ -25,3 +25,4 @@ h2{font-size:18px;margin:0 0 12px}
 td .ghost{padding:5px 10px;font-size:13px}.ok-btn{color:var(--ok)}.bad-btn{color:var(--bad)}
 .empty{color:var(--muted);padding:18px 0}
 .checklist li{margin:6px 0}.checklist .y{color:var(--ok)}.checklist .n{color:var(--bad)}
+code{font-size:12px;background:rgba(0,0,0,.05);padding:1px 4px;border-radius:4px}.msg .checklist{margin:8px 0;padding-left:4px;list-style:none}

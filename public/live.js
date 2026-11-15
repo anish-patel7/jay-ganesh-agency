@@ -22,11 +22,13 @@ function showConn(){
 
 function loginView(message,kind='err'){
   logoutBtn.hidden=true;
-  const setupNote=status&&!status.sheetsConnected?`<div class="msg err"><b>Google Sheet is not connected yet.</b><br>${esc(status.error||'Set SERVER_ENABLED, GOOGLE_SHEETS_ID and GOOGLE_SERVICE_ACCOUNT_JSON on the server.')}</div>`:'';
-  const adminNote=status&&!status.adminConfigured?`<div class="msg err">Admin login is not set up yet (ADMIN_MOBILE and ADMIN_PASSWORD).</div>`:'';
+  const setup=status?.setup||{},bad=Object.entries(setup).filter(([,v])=>v!=='ok');
+  const checklist=bad.length?`<div class="msg err"><b>Server settings to fix in Vercel → Settings → Environment Variables:</b><ul class="checklist">${Object.entries(setup).map(([k,v])=>`<li class="${v==='ok'?'y':'n'}">${v==='ok'?'✔':'✖'} <code>${esc(k)}</code>${v==='ok'?'':' — '+esc(v)}</li>`).join('')}</ul>After saving, go to Deployments → ⋯ → <b>Redeploy</b>.</div>`:'';
+  const setupNote=status&&!status.sheetsConnected&&!bad.length?`<div class="msg err"><b>Google Sheet is not connected.</b><br>${esc(status.error||'Connecting… refresh in a few seconds.')}${status.serviceAccountEmail?`<br><small>Service account: <code>${esc(status.serviceAccountEmail)}</code></small>`:''}</div>`:'';
+
   view.innerHTML=`<section class="card login">
     <h1>Log in</h1><p>Main Admin: use your admin mobile number and password.</p>
-    ${setupNote}${adminNote}
+    ${checklist}${setupNote}
     <form id="lf" autocomplete="on">
       <label for="m">Mobile number</label><input id="m" name="mobile" inputmode="numeric" maxlength="10" pattern="[6-9][0-9]{9}" autocomplete="username" required>
       <label for="p">Password / PIN</label><input id="p" name="password" type="password" autocomplete="current-password" required>
