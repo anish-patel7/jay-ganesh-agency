@@ -3,13 +3,18 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<meta name="theme-color" content="#142b37" />
+<meta name="theme-color" content="#0f4e47" />
 <title>Jay Ganesh Agency | Diwali 2027</title>
-<meta name="description" content="Jay Ganesh Agency's private Diwali 2027 group contribution and order management portal." />
-<link rel="stylesheet" href="./styles.css" />
+<meta name="description" content="Jay Ganesh Agency's private Diwali 2027 group contribution portal." />
+<link rel="stylesheet" href="./live.css" />
 </head>
 <body>
-<div id="app"></div>
-<script type="module" src="./app.js"></script>
+<header class="top">
+  <div class="brand"><span class="mark">J</span><div><b>Jay Ganesh Agency</b><small>Diwali 2027</small></div></div>
+  <div class="top-right"><span id="conn" class="chip">Checking…</span><button id="logout" class="ghost" hidden>Log out</button></div>
+</header>
+<main id="view"></main>
+<footer>Private portal · data stored in the organiser's Google Sheet · <a href="/demo/">View demo</a></footer>
+<script type="module" src="./live.js"></script>
 </body>
 </html>

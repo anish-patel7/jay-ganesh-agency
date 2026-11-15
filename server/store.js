@@ -26,10 +26,18 @@ export const HEADERS={
  Customer_Summary:['customerId','name','monthlyEmi','paidCash','contributions','bonus','credit','remainingCash','updatedAt'],
  Group_Summary:['groupId','name','members','totalMonthlyEmi','verifiedCash','transfersConfirmed','updatedAt']
 };
+/** Service-account credentials: either the whole JSON key pasted into the
+ * GOOGLE_SERVICE_ACCOUNT_JSON environment variable (easiest on Render), or a
+ * file path in GOOGLE_APPLICATION_CREDENTIALS. */
+export function googleAuth(scopes){
+ const raw=process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+ if(raw&&raw.trim()){let credentials;try{credentials=JSON.parse(raw)}catch{throw Error('GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON')}if(credentials.private_key)credentials.private_key=credentials.private_key.replace(/\\n/g,'\n');return new google.auth.GoogleAuth({credentials,scopes})}
+ return new google.auth.GoogleAuth({scopes});
+}
 function colLetter(n){let s='';for(n++;n>0;n=Math.floor((n-1)/26))s=String.fromCharCode(65+(n-1)%26)+s;return s}
 export class SheetStore{
  constructor({sheets,spreadsheetId}){this.sheets=sheets;this.id=spreadsheetId;this.pending=Promise.resolve()}
- static async connect(){const auth=new google.auth.GoogleAuth({scopes:['https://www.googleapis.com/auth/spreadsheets','https://www.googleapis.com/auth/drive.file']});const client=await auth.getClient();return new SheetStore({sheets:google.sheets({version:'v4',auth:client}),spreadsheetId:process.env.GOOGLE_SHEETS_ID})}
+ static async connect(){const auth=googleAuth(['https://www.googleapis.com/auth/spreadsheets','https://www.googleapis.com/auth/drive.file']);const client=await auth.getClient();return new SheetStore({sheets:google.sheets({version:'v4',auth:client}),spreadsheetId:process.env.GOOGLE_SHEETS_ID})}
  async setup(){const {data}=await this.sheets.spreadsheets.get({spreadsheetId:this.id,fields:'sheets(properties(title))'});const names=new Set((data.sheets||[]).map(x=>x.properties.title));const missing=Object.keys(HEADERS).filter(x=>!names.has(x));if(missing.length)await this.sheets.spreadsheets.batchUpdate({spreadsheetId:this.id,requestBody:{requests:missing.map(title=>({addSheet:{properties:{title}}}))}});for(const sheet of Object.keys(HEADERS)){const r=await this.sheets.spreadsheets.values.get({spreadsheetId:this.id,range:`'${sheet}'!1:1`});const existing=(r.data.values||[])[0]||[],expected=HEADERS[sheet];if(!existing.length)await this.sheets.spreadsheets.values.update({spreadsheetId:this.id,range:`'${sheet}'!A1`,valueInputOption:'RAW',requestBody:{values:[expected]}});else if(existing.length<expected.length&&existing.every((h,i)=>h===expected[i]))await this.sheets.spreadsheets.values.update({spreadsheetId:this.id,range:`'${sheet}'!A1`,valueInputOption:'RAW',requestBody:{values:[expected]}});else if(existing.length!==expected.length||!existing.every((h,i)=>h===expected[i]))throw Error(`Unexpected worksheet columns in ${sheet}; review migration manually`)}}
  async list(name){const cols=HEADERS[name];if(!cols)throw Error(`Unknown worksheet: ${name}`);const r=await this.sheets.spreadsheets.values.get({spreadsheetId:this.id,range:`'${name}'!A2:${colLetter(cols.length-1)}`});return (r.data.values||[]).map((values,index)=>({__row:index+2,...Object.fromEntries(cols.map((c,i)=>[c,values[i]??'']))})).filter(o=>o[cols[0]]!=='')}
  async find(name,id,key='id'){return (await this.list(name)).find(x=>String(x[key])===String(id))||null}

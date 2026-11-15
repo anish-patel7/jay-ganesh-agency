@@ -1,5 +1,25 @@
 # Jay Ganesh Agency — Diwali 2027
 
+## Going live (Google Sheet backend + Main Admin login)
+
+The site at `/` is now the **live portal**: it talks to the Node server, which stores every record in your Google Sheet. The old browser-only demo is still available at `/demo/`.
+
+**What you need:** a Google Sheet, a Google Cloud service account (free), and a free Render account.
+
+1. **Google Cloud** (console.cloud.google.com): create a project → *APIs & Services → Enable APIs* → enable **Google Sheets API**. Then *IAM & Admin → Service Accounts → Create*, open it → *Keys → Add key → JSON*. A `.json` file downloads; keep it private.
+2. **Google Sheet:** create a blank sheet. Click **Share**, paste the service account's email (`…@….iam.gserviceaccount.com`) and give it **Editor**. Copy the sheet ID from the URL (`docs.google.com/spreadsheets/d/<THIS PART>/edit`).
+3. **Render** (render.com): sign in with GitHub → *New → Blueprint* → choose this repo. It reads `render.yaml` and asks for:
+   - `GOOGLE_SHEETS_ID`: the ID from step 2
+   - `GOOGLE_SERVICE_ACCOUNT_JSON`: open the downloaded `.json` file and paste its **entire contents**
+   - `ADMIN_MOBILE`: the 10-digit mobile number you will log in with
+   - `ADMIN_PASSWORD`: your admin password (10+ characters)
+4. Deploy. When it finishes, open the `https://….onrender.com` link. The badge at the top should say **Google Sheet connected**, and the server creates all worksheets (Customers, Payments, Groups…) in your sheet automatically.
+5. Log in with the admin mobile and password. The admin area has Overview, Registrations (approve/reject), Customers and Groups.
+
+`OPERATIONS_ENABLED`, `POLICY_APPROVED` and `FIREWORKS_LEGAL_CLEARANCE` stay `false` until you want customers to register, pay or order. To change any setting later, use Render → your service → **Environment**.
+
+Free Render services sleep after 15 minutes without visitors, so the first visit after that takes about 30 seconds.
+
 ## Customer login — four-digit PIN (15 Nov 2026)
 
 Customers enter a unique 10-digit mobile number and **exactly four numeric PIN digits** during registration. They confirm the PIN; once Main Admin approves, they use the same mobile and PIN to return to their permanent Customer ID. This replaces the previous 12-character customer password. Admin access retains a separate strong password. The data model continues to store only salted scrypt hashes (columns still named `passwordHash`/`passwordSalt` for backward schema compatibility). Direct buyer login also uses a 4-digit PIN.
