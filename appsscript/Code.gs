@@ -282,6 +282,9 @@ function run(action,req){preflight();req.allowPinChange=action==='me'||action===
  case 'admin.correctOrder':return adminCorrectOrder(req);
  case 'admin.recordExtra':return adminRecordExtra(req);
  case 'admin.approveOrder':return adminApproveOrder(req);
+ case 'admin.editOrder':return adminEditOrder(req);
+ case 'admin.reopenOrder':return adminReopenOrder(req);
+ case 'admin.removeList':return adminRemoveList(req);
  default:fail('Operation unavailable','NOT_FOUND');
 }}
 /* ===================== ORDERS =====================
@@ -318,7 +321,9 @@ function computeOrder(order,boxRows,uploads,pricing,account,extraVerified){
 }
 function canFinalize(order,f){if(f.pricingPending)return {allowed:false,reason:'PDF list pricing is pending'};if(order.kind==='EMI'&&f.unusedCredit>0)return {allowed:false,reason:'Selected order does not fully use the available EMI credit'};return {allowed:true};}
 /** Load everything an order calculation needs in one pass of each sheet. */
-function orderContext(){return {boxes:all('Order_Boxes'),uploads:all('Order_Uploads'),pricing:activePricing(),payments:all('Payments'),customers:all('Customers')};}
+/** PDF lists that still count (Main Admin can mark a wrong list as Removed; the file stays in Drive). */
+function liveUploads(){return all('Order_Uploads').filter(u=>u.status!=='Removed');}
+function orderContext(){return {boxes:all('Order_Boxes'),uploads:liveUploads(),pricing:activePricing(),payments:all('Payments'),customers:all('Customers')};}
 function orderFinancial(o,ctx){
  const c=o.kind==='EMI'?ctx.customers.find(x=>String(x.id)===String(o.customerId)):null,acct=c?paymentAccount(c,ctx.payments):null;
  const extra=ctx.payments.filter(p=>String(p.orderId)===String(o.id)&&p.kind==='EXTRA'&&p.status==='Verified').reduce((s,p)=>s+Number(p.amount),0);
@@ -344,7 +349,7 @@ function orderSaveDraft(req){allowOrder();const a=getActor(req,'customer');retur
  if(!ORDER_TYPES.includes(type))fail('Invalid order type');if(!Number.isInteger(listCount)||listCount<0||listCount>10)fail('Number of PDF lists must be 0–10');
  if((type==='Only Box'&&listCount!==0)||(type!=='Only Box'&&listCount<1))fail('Number of PDF lists does not match the order type');
  if(!Array.isArray(boxes)||boxes.length>50)fail('Invalid boxes');
- const uploaded=all('Order_Uploads').filter(u=>String(u.orderId)===String(o.id));
+ const uploaded=liveUploads().filter(u=>String(u.orderId)===String(o.id));
  if(type==='Only Box'&&uploaded.length)fail('Uploaded PDF lists exist. Ask Main Admin before changing to Only Box','CONFLICT');
  if(type!=='Only Box'&&uploaded.length>listCount)fail('You have already uploaded more PDF lists than this number','CONFLICT');
  const pricing=activePricing();for(const b of boxes){if(!pricing.some(p=>p.id===String(b.pricingId))||!Number.isSafeInteger(Number(b.quantity))||Number(b.quantity)<0||Number(b.quantity)>999)fail('Invalid box selection');}
@@ -362,7 +367,7 @@ function orderUpload(req){allowOrder();const a=getActor(req,'customer');
  let bytes;try{bytes=Utilities.base64Decode(b64);}catch(e){fail('A valid PDF file is required');}
  const magic=String.fromCharCode.apply(null,bytes.slice(0,5).map(n=>n<0?n+256:n));if(magic!=='%PDF-')fail('A valid PDF file is required');
  return locked(()=>{const o=myOwnOrder(a,req.orderId);if(o.status!=='Draft')fail('Locked order uploads cannot be changed','CONFLICT');if(o.type==='Only Box')fail('This order does not include a PDF list. Change the order type first.');
-  const existing=all('Order_Uploads').filter(x=>String(x.orderId)===String(o.id));if(existing.length>=Number(o.listCount))fail('All '+o.listCount+' PDF list(s) are already uploaded','CONFLICT');
+  const existing=liveUploads().filter(x=>String(x.orderId)===String(o.id));if(existing.length>=Number(o.listCount))fail('All '+o.listCount+' PDF list(s) are already uploaded','CONFLICT');
   const name=o.id+'_'+uid('LIST')+'.pdf';const file=orderUploadsFolder().createFile(Utilities.newBlob(bytes,'application/pdf',name));file.setDescription('Private customer PDF list for order '+o.id);
   const row={id:uid('FILE'),orderId:o.id,driveFileId:file.getId(),filename:name,originalFilename:safe(String(req.filename||'list.pdf').replace(/[\\/]/g,''),150),advertisedListValue:'',status:'Pending',approvedBy:'',approvedAt:'',createdAt:stamp(),declaredListValue:declared};
   ensureHeader('Order_Uploads');
@@ -376,7 +381,7 @@ function leaderOrders(req){const a=getActor(req,'leader'),g=groupOfLeader(a),ctx
  return {orders:all('Orders').filter(o=>ids.includes(String(o.customerId))).map(o=>orderView(o,ctx,false))};}
 function adminOrders(req){getActor(req,'admin');const ctx=orderContext();return {orders:all('Orders').map(o=>orderView(o,ctx,true)),pricing:ctx.pricing};}
 function adminPriceList(req){getActor(req,'admin');const v=Number(req.advertisedListValue);if(!wholeMoney(v))fail('Enter the advertised value of the list (₹0 or more)');
- return locked(()=>{const u=one('Order_Uploads',req.uploadId);if(!u)fail('PDF list not found','NOT_FOUND');const o=one('Orders',u.orderId);if(o&&o.status==='Finalized')fail('Order already approved','CONFLICT');
+ return locked(()=>{const u=one('Order_Uploads',req.uploadId);if(!u)fail('PDF list not found','NOT_FOUND');let o=one('Orders',u.orderId);if(o&&o.status==='Finalized')o=change('Orders',o.id,{status:'Locked',updatedAt:stamp()});
   change('Order_Uploads',u.id,{advertisedListValue:v,status:'Approved',approvedBy:'admin',approvedAt:stamp()});audit('admin','order.priceList','Order_Uploads',u.id,{value:u.advertisedListValue},{value:v},safe(req.reason,200));if(o)refreshOrderStatus(o);return {approved:true};});}
 function adminCorrectOrder(req){getActor(req,'admin');const reason=safe(req.reason,300),q=Number(req.quantity);if(reason.length<10)fail('State a reason of at least 10 characters');if(!Number.isSafeInteger(q)||q<0||q>999)fail('Quantity must be a whole number 0 or more');
  return locked(()=>{const o=one('Orders',req.orderId);if(!o||o.status!=='Locked')fail('Only locked (not yet approved) orders can be corrected','CONFLICT');if(!activePricing().some(p=>p.id===String(req.pricingId)))fail('Unknown box');
@@ -390,6 +395,35 @@ function adminRecordExtra(req){getActor(req,'admin');const amount=money(req.amou
 function adminApproveOrder(req){getActor(req,'admin');return locked(()=>{const o=one('Orders',req.orderId);if(!o||o.status!=='Locked')fail('The customer must lock the order before approval','CONFLICT');
  const f=orderFinancial(o,orderContext()),ok=canFinalize(o,f);if(!ok.allowed)fail(ok.reason,'CONFLICT');if(f.finalOutstanding>0)fail('Extra payment of ₹'+f.finalOutstanding+' must be received and recorded before approval','CONFLICT');
  change('Orders',o.id,{status:'Finalized',financialStatus:'Approved',updatedAt:stamp()});audit('admin','order.approve','Orders',o.id,{status:'Locked'},{status:'Finalized'},safe(req.reason,200));return {status:'Finalized'};});}
+/* ---- Main Admin order editing ---- */
+function adminOrder(req,allowed){const o=one('Orders',req.orderId);if(!o)fail('Order not found','NOT_FOUND');if(allowed&&!allowed.includes(o.status))fail('This action is not available for a '+o.status+' order','CONFLICT');return o;}
+function adminReason(req){const r=safe(req.reason,300);if(r.length<10)fail('State a reason of at least 10 characters (saved in Audit_Log)');return r;}
+function logAdjust(o,field,before,after,reason){put('Order_Adjustments',{id:uid('ADJ'),orderId:o.id,field,previousValue:before,newValue:after,reason,actorId:'admin',createdAt:stamp()});}
+/** Edit type, number of lists and every box quantity in one step. An approved order goes back to Locked for re-approval. */
+function adminEditOrder(req){getActor(req,'admin');const reason=adminReason(req);
+ const type=String(req.type||''),listCount=Number(req.listCount),boxes=req.boxes;
+ if(!ORDER_TYPES.includes(type))fail('Invalid order type');if(!Number.isInteger(listCount)||listCount<0||listCount>10)fail('Number of PDF lists must be 0–10');
+ if((type==='Only Box'&&listCount!==0)||(type!=='Only Box'&&listCount<1))fail('Number of PDF lists does not match the order type');
+ if(!Array.isArray(boxes)||boxes.length>50)fail('Invalid boxes');const pricing=activePricing();
+ for(const b of boxes){if(!pricing.some(p=>p.id===String(b.pricingId))||!Number.isSafeInteger(Number(b.quantity))||Number(b.quantity)<0||Number(b.quantity)>999)fail('Invalid box selection');}
+ if(type!=='Only List'&&!boxes.some(b=>Number(b.quantity)>0))fail('Select at least one box for this order type');
+ return locked(()=>{const o=adminOrder(req);const lists=liveUploads().filter(u=>String(u.orderId)===String(o.id));
+  if(lists.length>listCount)fail('This order has '+lists.length+' PDF list(s). Remove the extra list(s) first, or keep the number of lists at '+lists.length+'.','CONFLICT');
+  const existing=all('Order_Boxes').filter(x=>String(x.orderId)===String(o.id));let changes=0;
+  for(const p of pricing){const want=boxes.find(b=>String(b.pricingId)===p.id),q=want?Number(want.quantity):0,row=existing.find(x=>String(x.pricingId)===p.id),before=row?Number(row.quantity):0;
+   if(before===q)continue;changes++;if(row)change('Order_Boxes',row.id,{quantity:q});else put('Order_Boxes',{id:uid('OB'),orderId:o.id,pricingId:p.id,quantity:q});logAdjust(o,'quantity.'+p.id,before,q,reason);}
+  if(o.type!==type){logAdjust(o,'type',o.type,type,reason);changes++;}if(Number(o.listCount)!==listCount){logAdjust(o,'listCount',o.listCount,listCount,reason);changes++;}
+  if(!changes)fail('Nothing was changed');
+  const wasFinal=o.status==='Finalized';const next=change('Orders',o.id,{type,listCount,status:wasFinal?'Locked':o.status,updatedAt:stamp()});
+  audit('admin','order.adminEdit','Orders',o.id,{type:o.type,listCount:o.listCount,status:o.status},{type,listCount,boxes,status:next.status},reason);
+  refreshOrderStatus(next);return {saved:true,status:next.status,reapprovalNeeded:wasFinal};});}
+/** Send a locked or approved order back to the customer to change. */
+function adminReopenOrder(req){getActor(req,'admin');const reason=adminReason(req);return locked(()=>{const o=adminOrder(req,['Locked','Finalized']);
+ const next=change('Orders',o.id,{status:'Draft',lockedAt:'',updatedAt:stamp()});logAdjust(o,'status',o.status,'Draft',reason);audit('admin','order.reopen','Orders',o.id,{status:o.status},{status:'Draft'},reason);refreshOrderStatus(next);return {status:'Draft'};});}
+/** Take a wrong PDF list out of the order (file stays in Drive for the record). */
+function adminRemoveList(req){getActor(req,'admin');const reason=adminReason(req);return locked(()=>{const u=one('Order_Uploads',req.uploadId);if(!u||u.status==='Removed')fail('PDF list not found','NOT_FOUND');
+ const o=adminOrder({orderId:u.orderId});change('Order_Uploads',u.id,{status:'Removed'});logAdjust(o,'list.'+u.id,u.status,'Removed',reason);
+ const next=o.status==='Finalized'?change('Orders',o.id,{status:'Locked',updatedAt:stamp()}):o;audit('admin','order.removeList','Order_Uploads',u.id,{status:u.status},{status:'Removed'},reason);refreshOrderStatus(next);return {removed:true,status:next.status};});}
 /** Run ONCE from the Apps Script editor after this update: grants Google Drive
  * permission and creates the private folder for customers' PDF lists. */
 function setupOrderUploads(){

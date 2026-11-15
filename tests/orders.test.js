@@ -108,3 +108,36 @@ test('PDF list: valid PDF only, stored in Drive, priced by admin, then lockable'
  s.success('admin.priceList',{uploadId:ao.uploads[0].id,advertisedListValue:0},admin);
  assert.equal(s.success('admin.approveOrder',{orderId},admin).status,'Finalized','no credit, zero value list approved');
 });
+test('confirmed list price is included in the order total; admin can edit, remove a list and reopen',()=>{
+ const {s,admin,cust,leader}=setup();
+ s.success('admin.updateSetting',{key:'paymentPolicyConfirmed',enabled:true,acknowledged:true},admin);
+ for(const k of ['paymentEntriesEnabled','groupCollectionsEnabled'])s.success('admin.updateSetting',{key:k,enabled:true},admin);
+ s.success('admin.updateSetting',{key:'orderPolicyConfirmed',enabled:true,acknowledged:true},admin);s.success('admin.updateSetting',{key:'ordersEnabled',enabled:true},admin);
+ payVerified(s,admin,cust,leader,[[1,1500],[2,1000],[3,1000],[4,1000],[5,1000]]); // credit 5000
+ const {orderId}=s.success('order.create',{},cust);
+ s.success('order.saveDraft',{orderId,type:'Both',listCount:1,boxes:[{pricingId:'BOX-1',quantity:1}]},cust); // box 2000
+ s.success('order.upload',{orderId,filename:'l.pdf',declaredListValue:8000,fileBase64:Buffer.from('%PDF-1.4 a').toString('base64')},cust);
+ let f=s.success('order.mine',{},cust).order.financial;assert.equal(f.estimatedOrderValue,2000+4000,'estimate uses 50% of stated 8000');
+ s.success('order.lock',{orderId},cust);
+ const up=s.success('admin.orders',{},admin).orders[0].uploads[0];
+ s.success('admin.priceList',{uploadId:up.id,advertisedListValue:6000},admin); // admin confirms 6000 -> 3000 at 50%
+ f=s.success('admin.orders',{},admin).orders[0].financial;
+ assert.equal(f.boxSubtotal,2000);assert.equal(f.listAdvertised,6000);assert.equal(f.listSubtotal,3000);
+ assert.equal(f.discountedOrderValue,5000,'total = boxes 2000 + list 3000');assert.equal(f.unusedCredit,0);assert.equal(f.extraPayable,0);
+ assert.equal(s.success('admin.approveOrder',{orderId},admin).status,'Finalized');
+ // edit after approval: needs reason, goes back to Locked
+ assert.equal(s.send('admin.editOrder',{orderId,type:'Both',listCount:1,boxes:[{pricingId:'BOX-1',quantity:2}],reason:'x'},admin).code,'BAD_REQUEST');
+ const r=s.success('admin.editOrder',{orderId,type:'Both',listCount:1,boxes:[{pricingId:'BOX-1',quantity:2}],reason:'Customer added one more box by phone'},admin);
+ assert.equal(r.status,'Locked');assert.equal(r.reapprovalNeeded,true);
+ f=s.success('admin.orders',{},admin).orders[0].financial;assert.equal(f.discountedOrderValue,7000);assert.equal(f.extraPayable,2000);
+ // switching to Only Box while a list exists is blocked until the list is removed
+ assert.equal(s.send('admin.editOrder',{orderId,type:'Only Box',listCount:0,boxes:[{pricingId:'BOX-1',quantity:2}],reason:'List cancelled by customer'},admin).code,'CONFLICT');
+ s.success('admin.removeList',{uploadId:up.id,reason:'List cancelled by customer'},admin);
+ s.success('admin.editOrder',{orderId,type:'Only Box',listCount:0,boxes:[{pricingId:'BOX-1',quantity:2},{pricingId:'BOX-3',quantity:0}],reason:'List cancelled by customer'},admin);
+ let o=s.success('admin.orders',{},admin).orders[0];assert.equal(o.uploads.length,0);assert.equal(o.financial.discountedOrderValue,4000);assert.equal(o.financial.unusedCredit,1000);
+ // reopen for the customer to fix it themselves
+ assert.equal(s.success('admin.reopenOrder',{orderId,reason:'Customer wants to choose again'},admin).status,'Draft');
+ s.success('order.saveDraft',{orderId,type:'Only Box',listCount:0,boxes:[{pricingId:'BOX-1',quantity:1},{pricingId:'BOX-2',quantity:1}]},cust);
+ s.success('order.lock',{orderId},cust);assert.equal(s.success('admin.approveOrder',{orderId},admin).status,'Finalized');
+ assert.ok(s.sheets.get('Order_Adjustments').rows.length>=6,'every admin change logged');
+});
