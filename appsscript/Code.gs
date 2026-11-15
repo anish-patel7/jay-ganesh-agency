@@ -3,7 +3,7 @@
  * Apps Script V8. Bind this project to the organizer's Google Sheet.
  * Deploy as a Web App: execute as Me; access Anyone. Requests MUST be sent
  * through the private Vercel Function with API_SHARED_SECRET.
- * Keep financial/order operations disabled pending independent review.
+ * Orders open only when Main Admin confirms order terms / fireworks legal clearance and switches Order collection Live.
  * IMPORTANT: Sheets is NOT a transactional database.
  */
 const TZ = 'Asia/Kolkata';
@@ -66,18 +66,20 @@ function siteSettings(){
  const registrationEnabled=enabled('registrationEnabled',legacyEnabled);
  const paymentEntriesEnabled=enabled('paymentEntriesEnabled',legacyEnabled);
  const groupCollectionsEnabled=enabled('groupCollectionsEnabled',legacyEnabled);
+ const oPolicy=enabled('orderPolicyConfirmed',prop('FIREWORKS_LEGAL_CLEARANCE')==='true');
+ const ordersEnabled=enabled('ordersEnabled',false);
  // No fixed date windows: Main Admin's Live/Stop switches decide (with policy approvals).
  const registrationWithinDates=true;
  const paymentWithinDates=true;
  return {
-  registrationTermsConfirmed:rTerms,paymentPolicyConfirmed:pPolicy,
+  registrationTermsConfirmed:rTerms,paymentPolicyConfirmed:pPolicy,orderPolicyConfirmed:oPolicy,ordersEnabled,ordersOpen:oPolicy&&ordersEnabled,
   registrationEnabled,paymentEntriesEnabled,groupCollectionsEnabled,
   registrationWithinDates,paymentWithinDates,
   registrationOpen:rTerms&&registrationEnabled&&registrationWithinDates,
   paymentEntriesOpen:pPolicy&&paymentEntriesEnabled&&paymentWithinDates,
   groupCollectionsOpen:pPolicy&&groupCollectionsEnabled,
   registrationWindow:'Controlled by Main Admin',paymentWindow:'Controlled by Main Admin',
-  ordersEnabled:false,refundsEnabled:false,fireworksLegalClearance:prop('FIREWORKS_LEGAL_CLEARANCE')==='true'
+  refundsEnabled:false,fireworksLegalClearance:oPolicy
  };
 }
 function allowRegistration(){const s=siteSettings();if(!s.registrationOpen)fail('Registration currently closed. Main Admin has stopped registration.','CLOSED');}
@@ -85,13 +87,14 @@ function allowPayment(){const s=siteSettings();if(!s.paymentEntriesOpen)fail('Pa
 function allowGroupCollection(){if(!siteSettings().groupCollectionsOpen)fail('Group collection processing currently paused by Main Admin','CLOSED');}
 function adminSettings(req){getActor(req,'admin');return siteSettings();}
 function updateAdminSetting(req){getActor(req,'admin');
- const keys=['registrationTermsConfirmed','paymentPolicyConfirmed','registrationEnabled','paymentEntriesEnabled','groupCollectionsEnabled'];
+ const keys=['registrationTermsConfirmed','paymentPolicyConfirmed','orderPolicyConfirmed','registrationEnabled','paymentEntriesEnabled','groupCollectionsEnabled','ordersEnabled'];
  const key=String(req.key||'');if(!keys.includes(key)||typeof req.enabled!=='boolean')fail('Invalid setting');
- if(req.enabled&&['registrationTermsConfirmed','paymentPolicyConfirmed'].includes(key)&&req.acknowledged!==true)fail('Confirm that the applicable customer terms and policies have been independently approved');
+ if(req.enabled&&['registrationTermsConfirmed','paymentPolicyConfirmed','orderPolicyConfirmed'].includes(key)&&req.acknowledged!==true)fail('Confirm that the applicable customer terms and policies have been independently approved');
  return locked(()=>{
   const current=siteSettings();
   if(req.enabled&&key==='registrationEnabled'&&!current.registrationTermsConfirmed)fail('Approve and publish registration terms and privacy notice before enabling registration','CONFLICT');
   if(req.enabled&&['paymentEntriesEnabled','groupCollectionsEnabled'].includes(key)&&!current.paymentPolicyConfirmed)fail('Approve incomplete-EMI/refund/payment rules and applicable legal requirements first','CONFLICT');
+  if(req.enabled&&key==='ordersEnabled'&&!current.orderPolicyConfirmed)fail('Confirm order terms and legal clearance for fireworks sales first','CONFLICT');
   const existing=one('Settings',key,'key');const before=existing?String(existing.value):String(current[key]);const value=String(req.enabled);
   if(existing)change('Settings',key,{value,updatedAt:stamp(),updatedBy:'admin'},'key');
   else put('Settings',{key,value,updatedAt:stamp(),updatedBy:'admin'});
@@ -268,8 +271,124 @@ function run(action,req){preflight();req.allowPinChange=action==='me'||action===
  case 'leader.rejectPayment':return reviewPayment(req,false);
  case 'leader.collection':return createCollection(req);
  case 'changePin':return changePin(req);
+ case 'order.mine':return orderMine(req);
+ case 'order.create':return orderCreate(req);
+ case 'order.saveDraft':return orderSaveDraft(req);
+ case 'order.upload':return orderUpload(req);
+ case 'order.lock':return orderLock(req);
+ case 'leader.orders':return leaderOrders(req);
+ case 'admin.orders':return adminOrders(req);
+ case 'admin.priceList':return adminPriceList(req);
+ case 'admin.correctOrder':return adminCorrectOrder(req);
+ case 'admin.recordExtra':return adminRecordExtra(req);
+ case 'admin.approveOrder':return adminApproveOrder(req);
  default:fail('Operation unavailable','NOT_FOUND');
 }}
+/* ===================== ORDERS =====================
+ * Ported from the original Node server (server/index.js + server/rules.js).
+ * One order per approved customer (Group Leaders included). Box prices come
+ * from Pricing_Master; EMI orders pay the scheme price (50% of advertised).
+ * PDF lists are stored privately in the owner's Google Drive and priced by
+ * Main Admin. Every change is written to Audit_Log.
+ * Controlled by Settings: orderPolicyConfirmed + ordersEnabled. */
+const ORDER_TYPES=['Only Box','Only List','Both'];
+function allowOrder(){if(!siteSettings().ordersOpen)fail('Order collection is currently stopped by Main Admin','CLOSED');}
+function wholeMoney(n){return Number.isFinite(n)&&n>=0&&Math.abs(n*100-Math.round(n*100))<1e-7;}
+function activePricing(){return all('Pricing_Master').filter(x=>String(x.active)!=='false').map(x=>({id:String(x.id),name:String(x.name),advertised:Number(x.advertised),scheme:Number(x.scheme)}));}
+/** Same rules as server/rules.js paymentAccount(). */
+function paymentAccount(c,payments){
+ const m=Number(c.emi),first=m*1.5,packing=m*0.5,cashTotal=m*9.5;
+ const verified=payments.filter(x=>String(x.customerId)===String(c.id)&&String(x.kind||'EMI')==='EMI'&&x.status==='Verified');
+ const paidInst=i=>verified.filter(x=>Number(x.installment)===i).reduce((s,x)=>s+Number(x.amount),0);
+ let paidCash=0,contributions=0,complete=true;
+ for(let i=1;i<=9;i++){const paid=paidInst(i),due=i===1?first:m;paidCash+=paid;contributions+=i===1?Math.min(m,Math.max(0,paid-packing)):Math.min(m,paid);if(paid<due)complete=false;}
+ const bonus=complete&&String(c.bonusApproved)==='true'?m:0;
+ return {paidCash,contributions,complete,approvedBonus:bonus,availableCredit:contributions+bonus,packing,remainingCash:Math.max(0,cashTotal-paidCash)};
+}
+/** Same rules as server/rules.js computeOrder(). */
+function computeOrder(order,boxRows,uploads,pricing,account,extraVerified){
+ const direct=order.kind==='DIRECT',prices=Object.fromEntries(pricing.map(x=>[x.id,x]));let boxAdvertised=0,boxSubtotal=0;
+ for(const b of boxRows){const x=prices[String(b.pricingId)];if(!x)fail('Unknown or inactive box: '+b.pricingId);const qty=Number(b.quantity);if(!Number.isSafeInteger(qty)||qty<0||!wholeMoney(x.advertised)||!wholeMoney(x.scheme))fail('Invalid box configuration');
+  if(!direct&&Math.abs(x.scheme-x.advertised*0.5)>0.000001)fail('EMI box scheme price must be exactly 50% of advertised value','SETUP');boxAdvertised+=qty*x.advertised;boxSubtotal+=qty*(direct?x.advertised:x.scheme);}
+ let listAdvertised=0,pricingPending=false;
+ for(const u of uploads){if(u.status!=='Approved'){pricingPending=true;continue;}listAdvertised+=Number(u.advertisedListValue)||0;}
+ const listSubtotal=direct?listAdvertised:listAdvertised*0.5,discounted=boxSubtotal+listSubtotal,credit=direct?0:(account?account.availableCredit:0);
+ const unused=Math.max(0,credit-discounted),extraPayable=Math.max(0,discounted-credit),finalOutstanding=Math.max(0,extraPayable-(extraVerified||0));
+ return {boxAdvertised,listAdvertised,boxSubtotal,listSubtotal,discountedOrderValue:discounted,availableCredit:credit,appliedCredit:Math.min(discounted,credit),unusedCredit:unused,extraPayable,extraVerified:extraVerified||0,finalOutstanding,pricingPending,extraAdvertisedListRequired:direct?0:unused*2,financialStatus:pricingPending?'Pricing Pending':unused>0?'Under-credit':'Validated'};
+}
+function canFinalize(order,f){if(f.pricingPending)return {allowed:false,reason:'PDF list pricing is pending'};if(order.kind==='EMI'&&f.unusedCredit>0)return {allowed:false,reason:'Selected order does not fully use the available EMI credit'};return {allowed:true};}
+/** Load everything an order calculation needs in one pass of each sheet. */
+function orderContext(){return {boxes:all('Order_Boxes'),uploads:all('Order_Uploads'),pricing:activePricing(),payments:all('Payments'),customers:all('Customers')};}
+function orderFinancial(o,ctx){
+ const c=o.kind==='EMI'?ctx.customers.find(x=>String(x.id)===String(o.customerId)):null,acct=c?paymentAccount(c,ctx.payments):null;
+ const extra=ctx.payments.filter(p=>String(p.orderId)===String(o.id)&&p.kind==='EXTRA'&&p.status==='Verified').reduce((s,p)=>s+Number(p.amount),0);
+ return computeOrder(o,ctx.boxes.filter(b=>String(b.orderId)===String(o.id)&&Number(b.quantity)>0),ctx.uploads.filter(u=>String(u.orderId)===String(o.id)),ctx.pricing,acct,extra);
+}
+function orderView(o,ctx,forAdmin){
+ const boxes=ctx.boxes.filter(b=>String(b.orderId)===String(o.id)&&Number(b.quantity)>0).map(b=>{const p=ctx.pricing.find(x=>x.id===String(b.pricingId))||{};return {pricingId:String(b.pricingId),name:p.name||String(b.pricingId),quantity:Number(b.quantity),advertised:p.advertised||0,scheme:p.scheme||0};});
+ const uploads=ctx.uploads.filter(u=>String(u.orderId)===String(o.id)).map(u=>{const v={id:u.id,filename:u.originalFilename||u.filename,status:u.status,advertisedListValue:u.advertisedListValue===''?null:Number(u.advertisedListValue),createdAt:u.createdAt};if(forAdmin&&u.driveFileId)v.url='https://drive.google.com/file/d/'+encodeURIComponent(u.driveFileId)+'/view';return v;});
+ const c=ctx.customers.find(x=>String(x.id)===String(o.customerId))||{};
+ const extras=ctx.payments.filter(p=>String(p.orderId)===String(o.id)&&p.kind==='EXTRA').map(p=>({id:p.id,amount:Number(p.amount),mode:p.mode,reference:p.reference,status:p.status,createdAt:p.createdAt}));
+ return {id:o.id,customerId:o.customerId,customerName:c.name||'',kind:o.kind,type:o.type,status:o.status,listCount:Number(o.listCount||0),createdAt:o.createdAt,lockedAt:o.lockedAt,updatedAt:o.updatedAt,boxes,uploads,extras,financial:orderFinancial(o,ctx)};
+}
+function refreshOrderStatus(o){const f=orderFinancial(o,orderContext());change('Orders',o.id,{financialStatus:o.status==='Finalized'?'Approved':f.financialStatus,updatedAt:stamp()});return f;}
+function myOrderRow(a){return all('Orders').find(o=>String(o.customerId)===String(a.customerId))||null;}
+function myOwnOrder(a,id){const o=one('Orders',id);if(!o||String(o.customerId)!==String(a.customerId))fail('Not your order','FORBIDDEN');return o;}
+
+function orderMine(req){const a=getActor(req,'customer'),c=ownCustomer(a),ctx=orderContext(),o=myOrderRow(a);
+ return {ordersOpen:siteSettings().ordersOpen,pricing:ctx.pricing,account:paymentAccount(c,ctx.payments),order:o?orderView(o,ctx,false):null,orderTypes:ORDER_TYPES};}
+function orderCreate(req){allowOrder();const a=getActor(req,'customer');return locked(()=>{const c=ownCustomer(a);if(myOrderRow(a))fail('Only one order per customer is permitted','CONFLICT');
+ const o={id:uid('ORD'),accountId:c.id,customerId:c.id,kind:'EMI',type:'Only Box',status:'Draft',listCount:0,createdAt:stamp(),lockedAt:'',financialStatus:'Pricing Pending',updatedAt:stamp()};put('Orders',o);audit(c.id,'order.create','Orders',o.id,null,{type:o.type},'');return {orderId:o.id};});}
+function orderSaveDraft(req){allowOrder();const a=getActor(req,'customer');return locked(()=>{const o=myOwnOrder(a,req.orderId);if(o.status!=='Draft')fail('This order is locked','CONFLICT');
+ const type=String(req.type||''),listCount=Number(req.listCount),boxes=req.boxes;
+ if(!ORDER_TYPES.includes(type))fail('Invalid order type');if(!Number.isInteger(listCount)||listCount<0||listCount>10)fail('Number of PDF lists must be 0–10');
+ if((type==='Only Box'&&listCount!==0)||(type!=='Only Box'&&listCount<1))fail('Number of PDF lists does not match the order type');
+ if(!Array.isArray(boxes)||boxes.length>50)fail('Invalid boxes');
+ const uploaded=all('Order_Uploads').filter(u=>String(u.orderId)===String(o.id));
+ if(type==='Only Box'&&uploaded.length)fail('Uploaded PDF lists exist. Ask Main Admin before changing to Only Box','CONFLICT');
+ if(type!=='Only Box'&&uploaded.length>listCount)fail('You have already uploaded more PDF lists than this number','CONFLICT');
+ const pricing=activePricing();for(const b of boxes){if(!pricing.some(p=>p.id===String(b.pricingId))||!Number.isSafeInteger(Number(b.quantity))||Number(b.quantity)<0||Number(b.quantity)>999)fail('Invalid box selection');}
+ const existing=all('Order_Boxes').filter(x=>String(x.orderId)===String(o.id));
+ for(const row of existing){const want=boxes.find(b=>String(b.pricingId)===String(row.pricingId));const q=want?Number(want.quantity):0;if(Number(row.quantity)!==q)change('Order_Boxes',row.id,{quantity:q});}
+ for(const b of boxes){if(!existing.some(x=>String(x.pricingId)===String(b.pricingId))&&Number(b.quantity)>0)put('Order_Boxes',{id:uid('OB'),orderId:o.id,pricingId:String(b.pricingId),quantity:Number(b.quantity)});}
+ const next=change('Orders',o.id,{type,listCount,updatedAt:stamp()});audit(a.customerId,'order.saveDraft','Orders',o.id,null,{type,listCount,boxes},'');refreshOrderStatus(next);return {saved:true};});}
+function orderUploadsFolder(){let id=prop('ORDER_PDF_FOLDER_ID');if(id){try{return DriveApp.getFolderById(id);}catch(e){}}
+ const f=DriveApp.createFolder('Jay Ganesh Agency – Order PDF lists (private)');PropertiesService.getScriptProperties().setProperties({ORDER_PDF_FOLDER_ID:f.getId()});return f;}
+function orderUpload(req){allowOrder();const a=getActor(req,'customer');
+ const b64=String(req.fileBase64||'');if(!b64||b64.length>4200000)fail('PDF must be smaller than 3 MB');
+ let bytes;try{bytes=Utilities.base64Decode(b64);}catch(e){fail('A valid PDF file is required');}
+ const magic=String.fromCharCode.apply(null,bytes.slice(0,5).map(n=>n<0?n+256:n));if(magic!=='%PDF-')fail('A valid PDF file is required');
+ return locked(()=>{const o=myOwnOrder(a,req.orderId);if(o.status!=='Draft')fail('Locked order uploads cannot be changed','CONFLICT');if(o.type==='Only Box')fail('This order does not include a PDF list. Change the order type first.');
+  const existing=all('Order_Uploads').filter(x=>String(x.orderId)===String(o.id));if(existing.length>=Number(o.listCount))fail('All '+o.listCount+' PDF list(s) are already uploaded','CONFLICT');
+  const name=o.id+'_'+uid('LIST')+'.pdf';const file=orderUploadsFolder().createFile(Utilities.newBlob(bytes,'application/pdf',name));file.setDescription('Private customer PDF list for order '+o.id);
+  const row={id:uid('FILE'),orderId:o.id,driveFileId:file.getId(),filename:name,originalFilename:safe(String(req.filename||'list.pdf').replace(/[\\/]/g,''),150),advertisedListValue:'',status:'Pending',approvedBy:'',approvedAt:'',createdAt:stamp()};
+  put('Order_Uploads',row);audit(a.customerId,'order.uploadPdf','Orders',o.id,null,{file:name},'');refreshOrderStatus(o);return {id:row.id,status:'Pending'};});}
+function orderLock(req){allowOrder();const a=getActor(req,'customer');return locked(()=>{const o=myOwnOrder(a,req.orderId);if(o.status!=='Draft')fail('Already locked','CONFLICT');
+ const ctx=orderContext(),boxes=ctx.boxes.filter(x=>String(x.orderId)===String(o.id)&&Number(x.quantity)>0),uploads=ctx.uploads.filter(x=>String(x.orderId)===String(o.id));
+ if(o.type!=='Only List'&&!boxes.length)fail('Select at least one box');if(o.type!=='Only Box'&&uploads.length!==Number(o.listCount))fail('Upload all '+o.listCount+' PDF list(s) before locking');
+ const f=orderFinancial(o,ctx);if(!f.pricingPending&&f.unusedCredit>0)fail('Add more items to use your full scheme credit before locking','CONFLICT');
+ const status=f.pricingPending?'Pricing Pending':'Validated';change('Orders',o.id,{status:'Locked',lockedAt:stamp(),updatedAt:stamp(),financialStatus:status});audit(a.customerId,'order.lock','Orders',o.id,{status:'Draft'},{status:'Locked'},'');return {status:'Locked',financialStatus:status};});}
+function leaderOrders(req){const a=getActor(req,'leader'),g=groupOfLeader(a),ctx=orderContext();const ids=ctx.customers.filter(c=>String(c.groupId)===String(g.id)).map(c=>String(c.id));
+ return {orders:all('Orders').filter(o=>ids.includes(String(o.customerId))).map(o=>orderView(o,ctx,false))};}
+function adminOrders(req){getActor(req,'admin');const ctx=orderContext();return {orders:all('Orders').map(o=>orderView(o,ctx,true)),pricing:ctx.pricing};}
+function adminPriceList(req){getActor(req,'admin');const v=Number(req.advertisedListValue);if(!wholeMoney(v))fail('Enter the advertised value of the list (₹0 or more)');
+ return locked(()=>{const u=one('Order_Uploads',req.uploadId);if(!u)fail('PDF list not found','NOT_FOUND');const o=one('Orders',u.orderId);if(o&&o.status==='Finalized')fail('Order already approved','CONFLICT');
+  change('Order_Uploads',u.id,{advertisedListValue:v,status:'Approved',approvedBy:'admin',approvedAt:stamp()});audit('admin','order.priceList','Order_Uploads',u.id,{value:u.advertisedListValue},{value:v},safe(req.reason,200));if(o)refreshOrderStatus(o);return {approved:true};});}
+function adminCorrectOrder(req){getActor(req,'admin');const reason=safe(req.reason,300),q=Number(req.quantity);if(reason.length<10)fail('State a reason of at least 10 characters');if(!Number.isSafeInteger(q)||q<0||q>999)fail('Quantity must be a whole number 0 or more');
+ return locked(()=>{const o=one('Orders',req.orderId);if(!o||o.status!=='Locked')fail('Only locked (not yet approved) orders can be corrected','CONFLICT');if(!activePricing().some(p=>p.id===String(req.pricingId)))fail('Unknown box');
+  const b=all('Order_Boxes').find(x=>String(x.orderId)===String(o.id)&&String(x.pricingId)===String(req.pricingId));const before=b?Number(b.quantity):0;
+  if(b)change('Order_Boxes',b.id,{quantity:q});else put('Order_Boxes',{id:uid('OB'),orderId:o.id,pricingId:String(req.pricingId),quantity:q});
+  put('Order_Adjustments',{id:uid('ADJ'),orderId:o.id,field:'quantity.'+req.pricingId,previousValue:before,newValue:q,reason,actorId:'admin',createdAt:stamp()});audit('admin','order.correct','Orders',o.id,{[req.pricingId]:before},{[req.pricingId]:q},reason);refreshOrderStatus(o);return {corrected:true};});}
+function adminRecordExtra(req){getActor(req,'admin');const amount=money(req.amount),mode=req.mode==='Online'?'Online':'Cash',reference=safe(req.reference,120);
+ return locked(()=>{const o=one('Orders',req.orderId);if(!o||o.status!=='Locked')fail('Extra payments can be recorded only on locked orders awaiting approval','CONFLICT');
+  const p={id:uid('PAY'),customerId:o.customerId,orderId:o.id,kind:'EXTRA',installment:'',amount,mode,recipientId:'admin',status:'Verified',submittedBy:'admin',createdAt:stamp(),verifiedAt:stamp(),verifiedBy:'admin',reference,leaderApprovedBy:'',leaderApprovedAt:'',leaderRejectedAt:'',batchId:''};
+  put('Payments',p);audit('admin','order.extraPayment','Payments',p.id,null,{orderId:o.id,amount,mode},'Received by Main Admin');refreshOrderStatus(o);return {recorded:true};});}
+function adminApproveOrder(req){getActor(req,'admin');return locked(()=>{const o=one('Orders',req.orderId);if(!o||o.status!=='Locked')fail('The customer must lock the order before approval','CONFLICT');
+ const f=orderFinancial(o,orderContext()),ok=canFinalize(o,f);if(!ok.allowed)fail(ok.reason,'CONFLICT');if(f.finalOutstanding>0)fail('Extra payment of ₹'+f.finalOutstanding+' must be received and recorded before approval','CONFLICT');
+ change('Orders',o.id,{status:'Finalized',financialStatus:'Approved',updatedAt:stamp()});audit('admin','order.approve','Orders',o.id,{status:'Locked'},{status:'Finalized'},safe(req.reason,200));return {status:'Finalized'};});}
+/** Run ONCE from the Apps Script editor after this update: grants Google Drive
+ * permission and creates the private folder for customers' PDF lists. */
+function setupOrderUploads(){const f=orderUploadsFolder();console.log('Order PDF folder ready: '+f.getName()+' ('+f.getUrl()+')');}
 function doGet(){return ContentService.createTextOutput('Jay Ganesh Agency data gateway. No public access.');}
 function doPost(e){let answer;try{const req=JSON.parse(e&&e.postData&&e.postData.contents||'{}');const expected=prop('API_SHARED_SECRET');if(!expected||expected.length<32||!equals(req.sharedSecret,expected))fail('Unauthorized','UNAUTHORIZED');answer={ok:true,data:run(String(req.action||''),req)};}catch(err){const allowed=['UNAUTHORIZED','BAD_REQUEST','FORBIDDEN','CONFLICT','CLOSED','NOT_FOUND','RATE_LIMIT','SETUP','PIN_CHANGE_REQUIRED'];const code=allowed.includes(err.code)?err.code:'SERVER_ERROR';if(code==='SERVER_ERROR')console.error('JGA internal error',err&&err.stack||err);answer={ok:false,error:code==='SERVER_ERROR'?'Service error; contact administrator':err.message,code};}return ContentService.createTextOutput(JSON.stringify(answer)).setMimeType(ContentService.MimeType.JSON);}
 /** Run from Apps Script editor ONCE after setting Script Properties. */
