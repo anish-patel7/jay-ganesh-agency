@@ -2,7 +2,7 @@
 import crypto from 'node:crypto';
 const COOKIE='jga_session', MAX_AGE=12*60*60;
 const PUBLIC_ACTIONS=new Set(['status','login','registration','logout']);
-const ACTIONS=new Set(['status','login','registration','logout','me','admin.registrations','admin.approve','admin.reject','admin.customers','admin.groups','admin.groupCreate','admin.assign','admin.appointLeader','admin.collections','admin.verifyCollection','admin.rejectCollection','admin.resetPin','customer.dashboard','customer.payment','leader.queue','leader.ackPayment','leader.rejectPayment','leader.collection','changePin']);
+const ACTIONS=new Set(['status','login','registration','logout','me','admin.settings','admin.updateSetting','admin.registrations','admin.approve','admin.reject','admin.customers','admin.groups','admin.groupCreate','admin.assign','admin.appointLeader','admin.collections','admin.verifyCollection','admin.rejectCollection','admin.resetPin','customer.dashboard','customer.payment','leader.queue','leader.ackPayment','leader.rejectPayment','leader.collection','changePin']);
 const codeStatus={UNAUTHORIZED:401,FORBIDDEN:403,BAD_REQUEST:400,CONFLICT:409,CLOSED:423,NOT_FOUND:404,RATE_LIMIT:429,SETUP:503,PIN_CHANGE_REQUIRED:403,SERVER_ERROR:502};
 function json(res,code,obj){res.statusCode=code;res.setHeader('Content-Type','application/json; charset=utf-8');res.setHeader('Cache-Control','no-store, max-age=0');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Frame-Options','DENY');res.end(JSON.stringify(obj));}
 function digest(s){return crypto.createHmac('sha256',process.env.SESSION_SECRET||'').update(s).digest('base64url');}

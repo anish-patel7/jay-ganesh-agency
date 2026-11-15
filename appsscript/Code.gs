@@ -51,10 +51,50 @@ function change(name,id,values,key){const s=sheet(name),row=one(name,id,key);if(
 function audit(actor,action,entity,entityId,before,after,reason){put('Audit_Log',{id:uid('AUD'),actor,action,entity,entityId,before:JSON.stringify(before||{}).slice(0,2000),after:JSON.stringify(after||{}).slice(0,2000),reason:reason||'',createdAt:stamp()});}
 function locked(fn){const l=LockService.getScriptLock();l.waitLock(20000);try{return fn();}finally{l.releaseLock();}}
 function preflight(){if(!prop('SPREADSHEET_ID')||!prop('API_SHARED_SECRET')||!prop('PIN_PEPPER'))fail('Configuration incomplete','SETUP');}
-function operations(){return prop('OPERATIONS_ENABLED')==='true'&&prop('POLICY_APPROVED')==='true';}
+// Website controls live in the existing Settings worksheet, not in Vercel environment variables.
+// Old Script Properties are read ONLY as migration defaults until the Admin saves each setting.
+// All customer-facing operations are checked again server-side on each request.
+function settingEnabled(key,legacyDefault){const r=one('Settings',key,'key');return r?String(r.value)==='true':legacyDefault;}
 function openWindow(start,end){const d=dateIST();return d>=start&&d<=end;}
-function allowRegistration(){if(!operations()||!openWindow('2026-11-09','2026-11-30'))fail('Registration currently closed','CLOSED');}
-function allowPayment(){if(!operations()||!openWindow('2026-11-09','2027-07-31'))fail('Payment submissions currently closed','CLOSED');}
+function siteSettings(){
+ const legacyPolicy=prop('POLICY_APPROVED')==='true',legacyEnabled=prop('OPERATIONS_ENABLED')==='true';
+ const rTerms=settingEnabled('registrationTermsConfirmed',legacyPolicy);
+ const pPolicy=settingEnabled('paymentPolicyConfirmed',legacyPolicy);
+ const registrationEnabled=settingEnabled('registrationEnabled',legacyEnabled);
+ const paymentEntriesEnabled=settingEnabled('paymentEntriesEnabled',legacyEnabled);
+ const groupCollectionsEnabled=settingEnabled('groupCollectionsEnabled',legacyEnabled);
+ const registrationWithinDates=openWindow('2026-11-09','2026-11-30');
+ const paymentWithinDates=openWindow('2026-11-09','2027-07-31');
+ return {
+  registrationTermsConfirmed:rTerms,paymentPolicyConfirmed:pPolicy,
+  registrationEnabled,paymentEntriesEnabled,groupCollectionsEnabled,
+  registrationWithinDates,paymentWithinDates,
+  registrationOpen:rTerms&&registrationEnabled&&registrationWithinDates,
+  paymentEntriesOpen:pPolicy&&paymentEntriesEnabled&&paymentWithinDates,
+  groupCollectionsOpen:pPolicy&&groupCollectionsEnabled,
+  registrationWindow:'09 Nov – 30 Nov 2026',paymentWindow:'09 Nov 2026 – 31 Jul 2027',
+  ordersEnabled:false,refundsEnabled:false,fireworksLegalClearance:prop('FIREWORKS_LEGAL_CLEARANCE')==='true'
+ };
+}
+function allowRegistration(){const s=siteSettings();if(!s.registrationOpen)fail('Registration currently closed. Ask Main Admin to review Settings and the registration date window.','CLOSED');}
+function allowPayment(){const s=siteSettings();if(!s.paymentEntriesOpen)fail('Payment submissions currently closed. Ask Main Admin to review Settings and the payment date window.','CLOSED');}
+function allowGroupCollection(){if(!siteSettings().groupCollectionsOpen)fail('Group collection processing currently paused by Main Admin','CLOSED');}
+function adminSettings(req){getActor(req,'admin');return siteSettings();}
+function updateAdminSetting(req){getActor(req,'admin');
+ const keys=['registrationTermsConfirmed','paymentPolicyConfirmed','registrationEnabled','paymentEntriesEnabled','groupCollectionsEnabled'];
+ const key=String(req.key||'');if(!keys.includes(key)||typeof req.enabled!=='boolean')fail('Invalid setting');
+ if(req.enabled&&['registrationTermsConfirmed','paymentPolicyConfirmed'].includes(key)&&req.acknowledged!==true)fail('Confirm that the applicable customer terms and policies have been independently approved');
+ return locked(()=>{
+  const current=siteSettings();
+  if(req.enabled&&key==='registrationEnabled'&&!current.registrationTermsConfirmed)fail('Approve and publish registration terms and privacy notice before enabling registration','CONFLICT');
+  if(req.enabled&&['paymentEntriesEnabled','groupCollectionsEnabled'].includes(key)&&!current.paymentPolicyConfirmed)fail('Approve incomplete-EMI/refund/payment rules and applicable legal requirements first','CONFLICT');
+  const existing=one('Settings',key,'key');const before=existing?String(existing.value):String(current[key]);const value=String(req.enabled);
+  if(existing)change('Settings',key,{value,updatedAt:stamp(),updatedBy:'admin'},'key');
+  else put('Settings',{key,value,updatedAt:stamp(),updatedBy:'admin'});
+  audit('admin','settings.update','Settings',key,{value:before},{value},'Changed from Main Admin dashboard');
+  return siteSettings();
+ });
+}
 function publicCustomer(x){return {id:String(x.id),name:String(x.name),mobile:String(x.mobile),reference:String(x.reference),groupId:String(x.groupId||''),status:String(x.status),emi:Number(x.emi||0)};}
 function ownCustomer(actor){const c=one('Customers',actor.customerId);if(!c||c.status!=='Approved')fail('Customer not active','FORBIDDEN');return c;}
 function roleOf(customerId){return all('Groups').some(g=>g.leaderCustomerId===customerId)?'leader':'customer';}
@@ -134,13 +174,13 @@ function submitPayment(req){allowPayment();const a=getActor(req,'customer');retu
  audit(c.id,'payment.submit','Payments',p.id,null,{amount,installment,mode},'');return {payment:paymentView(p)};
 });}
 function leaderQueue(req){const a=getActor(req,'leader'),g=groupOfLeader(a),members=all('Customers').filter(c=>c.groupId===g.id);const payments=all('Payments').filter(p=>members.some(c=>c.id===p.customerId));return {group:groupSummary().find(x=>x.id===g.id),members:members.map(publicCustomer),payments:payments.map(p=>Object.assign(paymentView(p),{memberName:(members.find(c=>c.id===p.customerId)||{}).name||''})),collections:all('Group_Collections').filter(x=>x.groupId===g.id).map(collectionView)};}
-function reviewPayment(req,approve){const a=getActor(req,'leader');return locked(()=>{
+function reviewPayment(req,approve){allowGroupCollection();const a=getActor(req,'leader');return locked(()=>{
  const g=groupOfLeader(a),p=one('Payments',req.id),c=p&&one('Customers',p.customerId);if(!p||!c||c.groupId!==g.id||p.status!=='Awaiting Leader')fail('This payment is not awaiting your review','CONFLICT');
  const next=approve?'Leader Verified':'Leader Rejected';change('Payments',p.id,{status:next,leaderApprovedBy:approve?a.customerId:'',leaderApprovedAt:approve?stamp():'',leaderRejectedAt:approve?'':stamp()});
  audit(a.customerId,'payment.'+(approve?'acknowledge':'reject'),'Payments',p.id,{status:p.status},{status:next},safe(req.reason,150));return {status:next};
 });}
 function collectionView(b){return {id:b.id,groupId:b.groupId,leaderId:b.leaderId,amount:Number(b.amount),paymentCount:String(b.paymentIds||'').split(',').filter(Boolean).length,remittanceMethod:b.remittanceMethod,remittanceReference:b.remittanceReference,status:b.status,createdAt:b.createdAt};}
-function createCollection(req){const a=getActor(req,'leader');return locked(()=>{
+function createCollection(req){allowGroupCollection();const a=getActor(req,'leader');return locked(()=>{
  const g=groupOfLeader(a),members=all('Customers').filter(c=>c.groupId===g.id).map(c=>c.id),ids=Array.isArray(req.paymentIds)?req.paymentIds.map(String):[];
  if(!ids.length||ids.length>100||new Set(ids).size!==ids.length)fail('Select acknowledged payments');
  const eligible=all('Payments').filter(p=>ids.includes(p.id)&&members.includes(p.customerId)&&p.status==='Leader Verified');if(eligible.length!==ids.length)fail('Payment selection changed; refresh','CONFLICT');
@@ -171,12 +211,14 @@ function currentUser(req){req.allowPinChange=true;const a=getActor(req);return {
 function adminRegistrations(req){getActor(req,'admin');return {requests:all('Registration_Requests').map(x=>({id:x.id,name:x.name,mobile:x.mobile,reference:x.reference,emi:Number(x.emi||0),comments:x.comments,status:x.status,createdAt:x.createdAt}))};}
 function customerList(req){getActor(req,'admin');return {customers:all('Customers').map(publicCustomer)};}
 function groupList(req){getActor(req,'admin');return {groups:groupSummary()};}
-function status(){preflight();SpreadsheetApp.openById(prop('SPREADSHEET_ID')).getName();const configured=!!prop('ADMIN_PASSWORD_HASH');return {sheetsConnected:true,adminConfigured:configured,operationsAllowed:operations(),legalClearanceConfigured:false,backend:'Google Apps Script',note:'Financial and order operations require independent review'};}
+function status(){preflight();SpreadsheetApp.openById(prop('SPREADSHEET_ID')).getName();const configured=!!prop('ADMIN_PASSWORD_HASH');return Object.assign({sheetsConnected:true,adminConfigured:configured,backend:'Google Apps Script',note:'Money is not collected by this website. Orders and refunds remain disabled.'},siteSettings());}
 function run(action,req){preflight();req.allowPinChange=action==='me'||action==='changePin';switch(action){
  case 'status':return status();
  case 'login':return login(req);
  case 'me':return currentUser(req);
  case 'registration':return register(req);
+ case 'admin.settings':return adminSettings(req);
+ case 'admin.updateSetting':return updateAdminSetting(req);
  case 'admin.registrations':return adminRegistrations(req);
  case 'admin.approve':return approve(req);
  case 'admin.reject':return reject(req);

@@ -129,6 +129,9 @@ test('Vercel bridge checks Origin, issues signed HttpOnly cookie, rejects role f
    assert.match(login.headers['set-cookie'],/HttpOnly/);assert.match(login.headers['set-cookie'],/SameSite=Strict/);assert.match(login.headers['set-cookie'],/Secure/);
    const cookie=login.headers['set-cookie'].split(';')[0];
    assert.equal((await invoke('admin.groups',{},cookie)).status,200);
+   assert.equal((await invoke('admin.settings',{},cookie)).status,200);
+   assert.equal((await invoke('admin.updateSetting',{key:'registrationEnabled',enabled:false},cookie)).status,200);
+   assert.equal((await invoke('admin.updateSetting',{key:'registrationEnabled',enabled:true},cookie)).status,200);
    assert.equal((await invoke('admin.groups',{},cookie.replace('=', '=CORRUPTED'))).status,401);
    const reg=signup(s,'Customer','9876500044').registrationId;const admin=asUser(s.success('login',{mobile:MOBILE,password:'strong admin password test 2027'}));approved(s,reg,admin);
    const customer=await invoke('login',{mobile:'9876500044',password:'0427'});
@@ -136,4 +139,43 @@ test('Vercel bridge checks Origin, issues signed HttpOnly cookie, rejects role f
    assert.equal((await invoke('admin.groups',{actor:{role:'admin',mobile:MOBILE,authRev:'1'}},cCookie)).status,403);
    assert.equal((await invoke('me',{},cCookie)).data.role,'customer');
  }finally{global.fetch=fetch0;process.env=old}
+});
+
+test('Admin Settings controls are server-side, require approvals, and are audit logged',()=>{
+ const s=sandbox(),admin=asUser(s.success('login',{mobile:MOBILE,password:'strong admin password test 2027'}));
+ const status0=s.success('status');
+ assert.equal(status0.sheetsConnected,true);
+ assert.equal(typeof status0.registrationOpen,'boolean');
+ assert.equal(s.send('admin.settings').code,'UNAUTHORIZED');
+ assert.equal(s.send('admin.updateSetting',{key:'registrationEnabled',enabled:false}).code,'UNAUTHORIZED');
+ const policyOff=s.success('admin.updateSetting',{key:'registrationTermsConfirmed',enabled:false},admin);
+ assert.equal(policyOff.registrationOpen,false);
+ assert.equal(s.send('registration',{name:'Block',mobile:'9876500081',pin:'1234',emi:500,reference:'Ref',acceptedTerms:true}).code,'CLOSED');
+ assert.equal(s.send('admin.updateSetting',{key:'registrationTermsConfirmed',enabled:true},admin).code,'BAD_REQUEST');
+ assert.equal(s.send('admin.updateSetting',{key:'registrationEnabled',enabled:true},admin).code,'CONFLICT');
+ assert.equal(s.send('admin.updateSetting',{key:'adminRole',enabled:true,acknowledged:true},admin).code,'BAD_REQUEST');
+ assert.equal(s.send('admin.updateSetting',{key:'registrationTermsConfirmed',enabled:'true',acknowledged:true},admin).code,'BAD_REQUEST');
+ const approvedTerms=s.success('admin.updateSetting',{key:'registrationTermsConfirmed',enabled:true,acknowledged:true},admin);
+ assert.equal(approvedTerms.registrationTermsConfirmed,true);
+ const regOn=s.success('admin.updateSetting',{key:'registrationEnabled',enabled:true},admin);
+ assert.equal(regOn.registrationEnabled,true);
+ assert.equal(regOn.registrationOpen,regOn.registrationWithinDates);
+ s.success('admin.updateSetting',{key:'registrationEnabled',enabled:false},admin);
+ assert.equal(s.success('status').registrationOpen,false);
+ s.success('admin.updateSetting',{key:'paymentPolicyConfirmed',enabled:false},admin);
+ assert.equal(s.success('status').paymentEntriesOpen,false);
+ assert.equal(s.send('admin.updateSetting',{key:'paymentEntriesEnabled',enabled:true},admin).code,'CONFLICT');
+ assert.equal(s.send('admin.updateSetting',{key:'groupCollectionsEnabled',enabled:true},admin).code,'CONFLICT');
+ s.success('admin.updateSetting',{key:'paymentPolicyConfirmed',enabled:true,acknowledged:true},admin);
+ s.success('admin.updateSetting',{key:'paymentEntriesEnabled',enabled:false},admin);
+ assert.equal(s.success('status').paymentEntriesOpen,false);
+ s.success('admin.updateSetting',{key:'paymentEntriesEnabled',enabled:true},admin);
+ assert.equal(s.success('status').paymentEntriesOpen,s.success('status').paymentWithinDates);
+ s.success('admin.updateSetting',{key:'groupCollectionsEnabled',enabled:false},admin);
+ assert.equal(s.success('status').groupCollectionsOpen,false);
+ s.success('admin.updateSetting',{key:'groupCollectionsEnabled',enabled:true},admin);
+ assert.equal(s.success('status').groupCollectionsOpen,true);
+ assert.equal(s.success('status').ordersEnabled,false);
+ assert.equal(s.success('status').refundsEnabled,false);
+ assert.ok(s.sheets.get('Audit_Log').rows.some(r=>r[2]==='settings.update'));
 });
