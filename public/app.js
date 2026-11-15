@@ -32,7 +32,7 @@ async function api(action,fields={}){
 }
 const table=(heads,rows,empty='No records yet.')=>`<div class="table-wrap"><table><thead><tr>${heads.map(h=>`<th>${e(h)}</th>`).join('')}</tr></thead><tbody>${rows.length?rows.join(''):`<tr><td colspan="${heads.length}" class="empty">${e(empty)}</td></tr>`}</tbody></table></div>`;
 const tr=(...cells)=>`<tr>${cells.map(c=>`<td>${c}</td>`).join('')}</tr>`;
-const errBox=err=>`<div class="callout stop-callout">${e(err.message||err)}</div>`;
+const errBox=err=>`<div class="callout stop-callout">${e(explain(err)).replace(/\n/g,'<br>')}</div>`;
 const pinFields=`<div class="field"><label>Current 4-digit PIN</label><input name="currentPin" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" required></div><div class="field"><label>New 4-digit PIN</label><input name="newPin" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" required></div><div class="field"><label>Confirm new PIN</label><input name="confirm" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" required></div>`;
 
 function connChip(){if(!server)return '<span class="conn-chip bad">Connection unavailable</span>';return server.sheetsConnected?'<span class="conn-chip ok">Google Sheet connected</span>':'<span class="conn-chip bad">Setup pending</span>'}
@@ -134,6 +134,20 @@ async function adminOrdersTab(){
  ${panel('Approve order',`<p class="muted font-small">${ok?'All checks pass: lists priced, full credit used and extra payment recorded.':f.pricingPending?'Set the value of every PDF list first.':f.unusedCredit>0?`The order leaves ${rupee(f.unusedCredit)} credit unused. Correct the quantities or ask the customer.`:`Record the extra payment of ${rupee(f.finalOutstanding)} first.`}</p><div class="form-actions"><button class="btn btn-dark" data-action="orderApprove" data-id="${e(sel.id)}" ${ok?'':'disabled'}>Approve order</button></div>`)}`:''}`;
 }
 
+/* ---------- On-page dialogs (browser pop-ups can be silently blocked) ---------- */
+function dialog(message,{input=false,cancel=true,okText='OK'}={}){return new Promise(resolve=>{document.getElementById('jga-modal')?.remove();
+ const wrap=document.createElement('div');wrap.id='jga-modal';wrap.className='modal-backdrop';
+ wrap.innerHTML=`<div class="modal-box" role="dialog" aria-modal="true"><div class="modal-text">${e(message).replace(/\n/g,'<br>')}</div>${input?'<textarea class="modal-input" maxlength="300" rows="3"></textarea>':''}<div class="form-actions">${cancel?'<button class="btn btn-light" data-m="no">Cancel</button>':''}<button class="btn btn-dark" data-m="ok">${e(okText)}</button></div></div>`;
+ const done=v=>{wrap.remove();resolve(v)};
+ wrap.addEventListener('click',ev=>{ev.stopPropagation();const m=ev.target.closest('[data-m]');if(m)done(m.dataset.m==='ok'?(input?wrap.querySelector('.modal-input').value:true):(input?null:false))});
+ wrap.addEventListener('keydown',ev=>{if(ev.key==='Escape')done(input?null:false)});
+ document.body.appendChild(wrap);(wrap.querySelector('.modal-input')||wrap.querySelector('[data-m=ok]')).focus();});}
+const ask=m=>dialog(m,{okText:'Confirm'});
+const askText=m=>dialog(m,{input:true,okText:'Continue'});
+const notify=m=>dialog(m,{cancel:false});
+/** Explain errors that mean the Apps Script is older than the website. */
+function explain(err){const m=String(err&&err.message||err);if(/Invalid setting|Operation unavailable|Operation not available/i.test(m))return m+'\n\nYour Google Apps Script is an older version than the website. Open Extensions → Apps Script, paste the latest Code.gs from GitHub, Save, then Deploy → Manage deployments → Edit → New version → Deploy.';return m;}
+
 /* ---------- Rendering ---------- */
 function toast(m){ui.toast=m;const old=$('toast');if(old)old.remove();document.querySelector('.app-shell')?.insertAdjacentHTML('beforeend',`<div id="toast" class="toast">${e(m)}</div>`);setTimeout(()=>{if(ui.toast===m){ui.toast='';$('toast')?.remove()}},4500)}
 function render(){const token=++renderToken;const body=ui.page==='home'?home():ui.page==='scheme'?scheme():ui.page==='register'?register():ui.page==='login'?loginPage():dashboard();
@@ -153,26 +167,26 @@ async function onAction(act,id){try{switch(act){
  case 'customer':case 'dashboard':return navigate(me?'dashboard':'login');
  case 'tab':ui.tab=id;ui.issuedPin=null;return render();
  case 'logout':try{await api('logout')}catch{}me=null;ui.tab='overview';navigate('home');return toast('Logged out.');
- case 'approve':if(!confirm('Approve this registration and create a permanent Customer ID?'))return;{const r=await api('admin.approve',{id});toast('Approved · Customer ID '+r.customerId)}return render();
- case 'reject':{const reason=prompt('Reason for rejecting this registration?');if(reason===null)return;await api('admin.reject',{id,reason});toast('Registration rejected.')}return render();
- case 'verifyCollection':if(!confirm('Have you received and reconciled the entire group amount?'))return;await api('admin.verifyCollection',{id});toast('Group collection verified.');return render();
- case 'rejectCollection':{const reason=prompt('Why is this group collection rejected?');if(reason===null)return;await api('admin.rejectCollection',{id,reason});toast('Group collection rejected.')}return render();
- case 'ackPayment':if(!confirm('Have you received and checked this payment?'))return;await api('leader.ackPayment',{id});toast('Payment acknowledged.');return render();
- case 'rejectPayment':{const reason=prompt('Reason for rejection?');if(reason===null)return;await api('leader.rejectPayment',{id,reason});toast('Payment rejected.')}return render();
+ case 'approve':if(!await ask('Approve this registration and create a permanent Customer ID?'))return;{const r=await api('admin.approve',{id});toast('Approved · Customer ID '+r.customerId)}return render();
+ case 'reject':{const reason=await askText('Reason for rejecting this registration?');if(reason===null)return;await api('admin.reject',{id,reason});toast('Registration rejected.')}return render();
+ case 'verifyCollection':if(!await ask('Have you received and reconciled the entire group amount?'))return;await api('admin.verifyCollection',{id});toast('Group collection verified.');return render();
+ case 'rejectCollection':{const reason=await askText('Why is this group collection rejected?');if(reason===null)return;await api('admin.rejectCollection',{id,reason});toast('Group collection rejected.')}return render();
+ case 'ackPayment':if(!await ask('Have you received and checked this payment?'))return;await api('leader.ackPayment',{id});toast('Payment acknowledged.');return render();
+ case 'rejectPayment':{const reason=await askText('Reason for rejection?');if(reason===null)return;await api('leader.rejectPayment',{id,reason});toast('Payment rejected.')}return render();
  case 'orderCreate':await api('order.create');toast('Order started. Choose your boxes.');return render();
- case 'orderLock':if(!confirm('Lock your order? You cannot change it afterwards.'))return;{const r=await api('order.lock',{orderId:id});toast(r.financialStatus==='Pricing Pending'?'Order locked · waiting for Main Admin to price your PDF list(s).':'Order locked · sent to Main Admin.')}return render();
+ case 'orderLock':if(!await ask('Lock your order? You cannot change it afterwards.'))return;{const r=await api('order.lock',{orderId:id});toast(r.financialStatus==='Pricing Pending'?'Order locked · waiting for Main Admin to price your PDF list(s).':'Order locked · sent to Main Admin.')}return render();
  case 'orderOpen':ui.orderId=id;return render();
- case 'orderApprove':if(!confirm('Approve this order? This is final.'))return;await api('admin.approveOrder',{orderId:id});toast('Order approved.');return render();
- case 'policy':{const [key]=id.split(':');if(!confirm('Withdraw this approval? Related controls will stop working until it is approved again.'))return;await api('admin.updateSetting',{key,enabled:false});await refreshStatus();toast('Approval withdrawn.')}return render();
+ case 'orderApprove':if(!await ask('Approve this order? This is final.'))return;await api('admin.approveOrder',{orderId:id});toast('Order approved.');return render();
+ case 'policy':{const [key]=id.split(':');if(!await ask('Withdraw this approval? Related controls will stop working until it is approved again.'))return;await api('admin.updateSetting',{key,enabled:false});await refreshStatus();toast('Approval withdrawn.')}return render();
  case 'toggle':{const [k,dir]=id.split(':'),on=dir==='on';const map={registration:['registrationEnabled','registrationTermsConfirmed','Registration'],payment:['paymentEntriesEnabled','paymentPolicyConfirmed','EMI submissions'],collections:['groupCollectionsEnabled','paymentPolicyConfirmed','Group collection processing'],orders:['ordersEnabled','orderPolicyConfirmed','Order collection']};const [key,policy,label]=map[k];
   if(on){const s=await api('admin.settings');
-   if(!s[policy]){const text=policy==='orderPolicyConfirmed'?'Before going live, confirm:\n\nOrder terms are approved, and you hold the licences / legal clearance needed to sell fireworks to these customers.\n\nClick OK to confirm and turn Order collection live.':policy==='registrationTermsConfirmed'?'Before going live, confirm:\n\nYour registration terms and privacy notice are approved and available to customers.\n\nClick OK to confirm and turn Registration live.':'Before going live, confirm:\n\nPayment, refund and incomplete-EMI rules, and any legal requirements, have been reviewed and approved.\n\nClick OK to confirm and continue.';if(!confirm(text))return;await api('admin.updateSetting',{key:policy,enabled:true,acknowledged:true})}
-   else if(!confirm(`Turn ${label} live?`))return;
+   if(!s[policy]){const text=policy==='orderPolicyConfirmed'?'Before going live, confirm:\n\nOrder terms are approved, and you hold the licences / legal clearance needed to sell fireworks to these customers.\n\nClick Confirm and turn Order collection live.':policy==='registrationTermsConfirmed'?'Before going live, confirm:\n\nYour registration terms and privacy notice are approved and available to customers.\n\nClick Confirm and turn Registration live.':'Before going live, confirm:\n\nPayment, refund and incomplete-EMI rules, and any legal requirements, have been reviewed and approved.\n\nClick Confirm and continue.';if(!await ask(text))return;await api('admin.updateSetting',{key:policy,enabled:true,acknowledged:true})}
+   else if(!await ask(`Turn ${label} live?`))return;
    const r=await api('admin.updateSetting',{key,enabled:true});await refreshStatus();
    const open=k==='registration'?r.registrationOpen:k==='payment'?r.paymentEntriesOpen:k==='orders'?r.ordersOpen:r.groupCollectionsOpen;toast(open?`${label} is now live.`:`${label} switched on, but its policy approval is missing.`);
-  }else{if(!confirm(`Stop ${label}? New actions stop immediately.`))return;await api('admin.updateSetting',{key,enabled:false});await refreshStatus();toast(`${label} stopped.`)}
+  }else{if(!await ask(`Stop ${label}? New actions stop immediately.`))return;await api('admin.updateSetting',{key,enabled:false});await refreshStatus();toast(`${label} stopped.`)}
   return render();}
-}}catch(err){if(err.status===401){me=null;ui.page='login';ui.notice='<div class="callout info mb-16">Your session ended. Please log in again.</div>';return render()}alert(err.message)}}
+}}catch(err){if(err.status===401){me=null;ui.page='login';ui.notice='<div class="callout info mb-16">Your session ended. Please log in again.</div>';return render()}notify(explain(err))}}
 
 async function onForm(name,f){const v=Object.fromEntries(new FormData(f).entries());const b=f.querySelector('[type=submit]');if(b)b.disabled=true;
  try{switch(name){
@@ -181,17 +195,17 @@ async function onForm(name,f){const v=Object.fromEntries(new FormData(f).entries
   case 'orderDraft':{const boxes=[...f.querySelectorAll('.box-qty')].map(x=>({pricingId:x.name.slice(4),quantity:Number(x.value||0)})).filter(b=>b.quantity>0);const type=v.type;const listCount=type==='Only Box'?0:Math.max(1,Number(v.listCount||1));await api('order.saveDraft',{orderId:v.orderId,type,listCount,boxes});toast('Order saved.');return render();}
   case 'orderUpload':{const file=f.querySelector('input[type=file]').files[0];if(!file)throw Error('Choose a PDF file');if(file.size>3*1024*1024)throw Error('PDF must be smaller than 3 MB');const b64=await new Promise((ok,no)=>{const r=new FileReader();r.onload=()=>ok(String(r.result).split(',')[1]||'');r.onerror=()=>no(Error('Could not read the file'));r.readAsDataURL(file)});await api('order.upload',{orderId:v.orderId,filename:file.name,fileBase64:b64});toast('PDF uploaded · Main Admin will set its value.');return render();}
   case 'priceList':await api('admin.priceList',{uploadId:v.uploadId,advertisedListValue:Number(v.advertisedListValue)});toast('List value saved.');return render();
-  case 'recordExtra':if(!confirm('Confirm you have received ₹'+v.amount+' for this order?'))return;await api('admin.recordExtra',{orderId:v.orderId,amount:Number(v.amount),mode:v.mode,reference:v.reference});toast('Extra payment recorded.');return render();
+  case 'recordExtra':if(!await ask('Confirm you have received ₹'+v.amount+' for this order?'))return;await api('admin.recordExtra',{orderId:v.orderId,amount:Number(v.amount),mode:v.mode,reference:v.reference});toast('Extra payment recorded.');return render();
   case 'correctOrder':await api('admin.correctOrder',{orderId:v.orderId,pricingId:v.pricingId,quantity:Number(v.quantity),reason:v.reason});toast('Correction saved and logged.');return render();
   case 'groupCreate':await api('admin.groupCreate',{name:v.name,reference:v.reference});toast('Group created.');return render();
   case 'assign':await api('admin.assign',{customerId:v.customerId,groupId:v.groupId});toast('Customer assigned.');return render();
   case 'appointLeader':await api('admin.appointLeader',{customerId:v.customerId,groupId:v.groupId});toast('Group Leader appointed.');return render();
-  case 'resetPin':{if(!confirm('Reset this customer’s PIN after identity verification?'))return;const d=await api('admin.resetPin',{mobile:v.mobile,reason:v.reason,identityVerified:v.identityVerified==='on'});ui.issuedPin={mobile:v.mobile,pin:d.temporaryPin};return render();}
+  case 'resetPin':{if(!await ask('Reset this customer’s PIN after identity verification?'))return;const d=await api('admin.resetPin',{mobile:v.mobile,reason:v.reason,identityVerified:v.identityVerified==='on'});ui.issuedPin={mobile:v.mobile,pin:d.temporaryPin};return render();}
   case 'payment':await api('customer.payment',{installment:Number(v.installment),amount:Number(v.amount),mode:v.mode,reference:v.reference});toast(me.role==='leader'?'Your payment is recorded as Leader Self-Declared. Include it in your next group collection.':'Payment entry submitted · awaiting your Group Leader.');ui.tab='history';return render();
-  case 'collection':{const boxes=[...f.querySelectorAll('.batchCheck:checked')],ids=boxes.map(x=>x.value),total=boxes.reduce((s,n)=>s+Number(n.dataset.amount),0);if(!ids.length)throw Error('Choose one or more payments');if(!confirm('Have you remitted '+rupee(total)+' to the Main Admin?'))return;await api('leader.collection',{paymentIds:ids,remittanceMethod:v.remittanceMethod,remittanceReference:v.remittanceReference});toast('Group collection submitted for Main Admin verification.');return render();}
+  case 'collection':{const boxes=[...f.querySelectorAll('.batchCheck:checked')],ids=boxes.map(x=>x.value),total=boxes.reduce((s,n)=>s+Number(n.dataset.amount),0);if(!ids.length)throw Error('Choose one or more payments');if(!await ask('Have you remitted '+rupee(total)+' to the Main Admin?'))return;await api('leader.collection',{paymentIds:ids,remittanceMethod:v.remittanceMethod,remittanceReference:v.remittanceReference});toast('Group collection submitted for Main Admin verification.');return render();}
   case 'changePin':{if(v.newPin!==v.confirm)throw Error('New PINs do not match');await api('changePin',{currentPin:v.currentPin,newPin:v.newPin});try{await api('logout')}catch{}me=null;ui.notice='<div class="callout info mb-16">PIN changed. Please log in with your new PIN.</div>';return navigate('login');}
  }}catch(err){f.querySelector('.form-error')?.remove();f.insertAdjacentHTML('beforeend',`<div class="form-error mt-16">${errBox(err)}</div>`)}finally{if(b&&document.body.contains(b))b.disabled=false}}
 
-document.addEventListener('click',ev=>{const el=ev.target.closest('[data-action]');if(!el||el.disabled)return;ev.preventDefault();onAction(el.dataset.action,el.dataset.id||'')});
+document.addEventListener('click',ev=>{if(ev.target.closest('#jga-modal'))return;const el=ev.target.closest('[data-action]');if(!el||el.disabled)return;ev.preventDefault();onAction(el.dataset.action,el.dataset.id||'')});
 document.addEventListener('submit',ev=>{const f=ev.target.closest('form[data-form]');if(!f)return;ev.preventDefault();onForm(f.dataset.form,f)});
 (async function boot(){render();const [,m]=await Promise.all([refreshStatus(),api('me').catch(()=>null)]);me=m&&m.role?m:null;if(me)ui.page='dashboard';render()})();
