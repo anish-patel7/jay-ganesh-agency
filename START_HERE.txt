@@ -1,0 +1,28 @@
+JAY GANESH AGENCY — VERCEL + APPS SCRIPT INTEGRATION
+
+THIS ZIP IS AN UPDATE FOR YOUR EXISTING GITHUB REPO, NOT A FULL SITE REPLACEMENT.
+
+1. FIRST read README_APPS_SCRIPT.md completely.
+2. Create a BLANK TEST Google Sheet; copy the ID.
+3. From that Sheet go to Extensions > Apps Script. Paste appsscript/Code.gs.
+4. Configure the private Script Properties exactly as explained in README_APPS_SCRIPT.md.
+5. Run initializeJayGanesh; deploy the script as a Web App /exec.
+6. Merge the ZIP's files into existing GitHub repository jay-ganesh-agency.
+7. Configure Vercel environment variables privately and deploy.
+8. Test all roles with FAKE accounts and payments; do not use real money.
+
+Do NOT post secrets or PINs on GitHub. Do NOT enable live orders or real financial operations.
+
+Contents:
+api/handler.js                  Private Vercel Function
+appsscript/Code.gs              Google Sheet data gateway
+appsscript/appsscript.json      Apps Script manifest
+public/index.html               Updated public home page (replaces existing)
+public/live-gas.js              Website role-specific UI
+public/gas.css                  Supplemental styles
+vercel.json                     Vercel deployment settings
+tests/integration.test.js       Node tests with simulated Sheet
+README_APPS_SCRIPT.md           Detailed setup and safety guide
+
+Note: This package expects your current repo to retain public/live.css,
+public/demo/ and other existing files; do not replace entire folders.
