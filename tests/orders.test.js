@@ -95,12 +95,13 @@ test('PDF list: valid PDF only, stored in Drive, priced by admin, then lockable'
  const {s,admin,cust,leader}=setup();
  s.success('admin.updateSetting',{key:'orderPolicyConfirmed',enabled:true,acknowledged:true},admin);s.success('admin.updateSetting',{key:'ordersEnabled',enabled:true},admin);
  const {orderId}=s.success('order.create',{},cust);
- assert.equal(s.send('order.upload',{orderId,filename:'a.pdf',fileBase64:Buffer.from('%PDF-1.4 x').toString('base64')},cust).code,'BAD_REQUEST','Only Box rejects PDF');
+ assert.equal(s.send('order.upload',{orderId,filename:'a.pdf',declaredListValue:100,fileBase64:Buffer.from('%PDF-1.4 x').toString('base64')},cust).code,'BAD_REQUEST','Only Box rejects PDF');
  s.success('order.saveDraft',{orderId,type:'Only List',listCount:1,boxes:[]},cust);
- assert.equal(s.send('order.upload',{orderId,filename:'a.pdf',fileBase64:Buffer.from('hello').toString('base64')},cust).code,'BAD_REQUEST','not a PDF');
- s.success('order.upload',{orderId,filename:'my list.pdf',fileBase64:Buffer.from('%PDF-1.4 test').toString('base64')},cust);
- assert.equal(s.files.size,1);assert.equal(s.send('order.upload',{orderId,filename:'b.pdf',fileBase64:Buffer.from('%PDF-1.4 t').toString('base64')},cust).code,'CONFLICT','max lists');
- let mine=s.success('order.mine',{},cust);assert.equal(mine.order.uploads[0].url,undefined,'customer gets no Drive link');assert.equal(mine.order.financial.pricingPending,true);
+ assert.equal(s.send('order.upload',{orderId,filename:'a.pdf',declaredListValue:100,fileBase64:Buffer.from('hello').toString('base64')},cust).code,'BAD_REQUEST','not a PDF');
+ assert.equal(s.send('order.upload',{orderId,filename:'my list.pdf',fileBase64:Buffer.from('%PDF-1.4 test').toString('base64')},cust).code,'BAD_REQUEST','list value required');
+ s.success('order.upload',{orderId,filename:'my list.pdf',declaredListValue:12000,fileBase64:Buffer.from('%PDF-1.4 test').toString('base64')},cust);
+ assert.equal(s.files.size,1);assert.equal(s.send('order.upload',{orderId,filename:'b.pdf',declaredListValue:5000,fileBase64:Buffer.from('%PDF-1.4 t').toString('base64')},cust).code,'CONFLICT','max lists');
+ let mine=s.success('order.mine',{},cust);assert.equal(mine.order.uploads[0].url,undefined,'customer gets no Drive link');assert.equal(mine.order.financial.pricingPending,true);assert.equal(mine.order.uploads[0].declaredListValue,12000);assert.equal(mine.order.financial.estimatedOrderValue,6000,'estimate = 50% of stated value');
  s.success('order.lock',{orderId},cust);
  const ao=s.success('admin.orders',{},admin).orders[0];assert.ok(ao.uploads[0].url.includes('drive.google.com'));
  assert.equal(s.send('admin.approveOrder',{orderId},admin).code,'CONFLICT','pricing pending');

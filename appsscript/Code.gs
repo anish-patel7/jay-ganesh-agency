@@ -20,7 +20,7 @@ const HEADERS = {
   Pricing_Master:['id','name','advertised','scheme','active','updatedAt'],
   Orders:['id','accountId','customerId','kind','type','status','listCount','createdAt','lockedAt','financialStatus','updatedAt'],
   Order_Boxes:['id','orderId','pricingId','quantity'],
-  Order_Uploads:['id','orderId','driveFileId','filename','originalFilename','advertisedListValue','status','approvedBy','approvedAt','createdAt'],
+  Order_Uploads:['id','orderId','driveFileId','filename','originalFilename','advertisedListValue','status','approvedBy','approvedAt','createdAt','declaredListValue'],
   Order_Adjustments:['id','orderId','field','previousValue','newValue','reason','actorId','createdAt'],
   Refunds:['id','paymentId','customerId','amount','status','reason','createdAt','reviewedAt'],
   Audit_Log:['id','actor','action','entity','entityId','before','after','reason','createdAt'],
@@ -311,10 +311,10 @@ function computeOrder(order,boxRows,uploads,pricing,account,extraVerified){
  for(const b of boxRows){const x=prices[String(b.pricingId)];if(!x)fail('Unknown or inactive box: '+b.pricingId);const qty=Number(b.quantity);if(!Number.isSafeInteger(qty)||qty<0||!wholeMoney(x.advertised)||!wholeMoney(x.scheme))fail('Invalid box configuration');
   if(!direct&&Math.abs(x.scheme-x.advertised*0.5)>0.000001)fail('EMI box scheme price must be exactly 50% of advertised value','SETUP');boxAdvertised+=qty*x.advertised;boxSubtotal+=qty*(direct?x.advertised:x.scheme);}
  let listAdvertised=0,pricingPending=false;
- for(const u of uploads){if(u.status!=='Approved'){pricingPending=true;continue;}listAdvertised+=Number(u.advertisedListValue)||0;}
+ let declaredPending=0;for(const u of uploads){if(u.status!=='Approved'){pricingPending=true;declaredPending+=Number(u.declaredListValue)||0;continue;}listAdvertised+=Number(u.advertisedListValue)||0;}
  const listSubtotal=direct?listAdvertised:listAdvertised*0.5,discounted=boxSubtotal+listSubtotal,credit=direct?0:(account?account.availableCredit:0);
  const unused=Math.max(0,credit-discounted),extraPayable=Math.max(0,discounted-credit),finalOutstanding=Math.max(0,extraPayable-(extraVerified||0));
- return {boxAdvertised,listAdvertised,boxSubtotal,listSubtotal,discountedOrderValue:discounted,availableCredit:credit,appliedCredit:Math.min(discounted,credit),unusedCredit:unused,extraPayable,extraVerified:extraVerified||0,finalOutstanding,pricingPending,extraAdvertisedListRequired:direct?0:unused*2,financialStatus:pricingPending?'Pricing Pending':unused>0?'Under-credit':'Validated'};
+ return {boxAdvertised,listAdvertised,boxSubtotal,listSubtotal,discountedOrderValue:discounted,availableCredit:credit,appliedCredit:Math.min(discounted,credit),unusedCredit:unused,extraPayable,extraVerified:extraVerified||0,finalOutstanding,pricingPending,extraAdvertisedListRequired:direct?0:unused*2,financialStatus:pricingPending?'Pricing Pending':unused>0?'Under-credit':'Validated',declaredPendingListValue:declaredPending,estimatedOrderValue:discounted+(direct?declaredPending:declaredPending*0.5)};
 }
 function canFinalize(order,f){if(f.pricingPending)return {allowed:false,reason:'PDF list pricing is pending'};if(order.kind==='EMI'&&f.unusedCredit>0)return {allowed:false,reason:'Selected order does not fully use the available EMI credit'};return {allowed:true};}
 /** Load everything an order calculation needs in one pass of each sheet. */
@@ -326,7 +326,7 @@ function orderFinancial(o,ctx){
 }
 function orderView(o,ctx,forAdmin){
  const boxes=ctx.boxes.filter(b=>String(b.orderId)===String(o.id)&&Number(b.quantity)>0).map(b=>{const p=ctx.pricing.find(x=>x.id===String(b.pricingId))||{};return {pricingId:String(b.pricingId),name:p.name||String(b.pricingId),quantity:Number(b.quantity),advertised:p.advertised||0,scheme:p.scheme||0};});
- const uploads=ctx.uploads.filter(u=>String(u.orderId)===String(o.id)).map(u=>{const v={id:u.id,filename:u.originalFilename||u.filename,status:u.status,advertisedListValue:u.advertisedListValue===''?null:Number(u.advertisedListValue),createdAt:u.createdAt};if(forAdmin&&u.driveFileId)v.url='https://drive.google.com/file/d/'+encodeURIComponent(u.driveFileId)+'/view';return v;});
+ const uploads=ctx.uploads.filter(u=>String(u.orderId)===String(o.id)).map(u=>{const v={id:u.id,filename:u.originalFilename||u.filename,status:u.status,advertisedListValue:u.advertisedListValue===''?null:Number(u.advertisedListValue),declaredListValue:u.declaredListValue===''||u.declaredListValue==null?null:Number(u.declaredListValue),createdAt:u.createdAt};if(forAdmin&&u.driveFileId)v.url='https://drive.google.com/file/d/'+encodeURIComponent(u.driveFileId)+'/view';return v;});
  const c=ctx.customers.find(x=>String(x.id)===String(o.customerId))||{};
  const extras=ctx.payments.filter(p=>String(p.orderId)===String(o.id)&&p.kind==='EXTRA').map(p=>({id:p.id,amount:Number(p.amount),mode:p.mode,reference:p.reference,status:p.status,createdAt:p.createdAt}));
  return {id:o.id,customerId:o.customerId,customerName:c.name||'',kind:o.kind,type:o.type,status:o.status,listCount:Number(o.listCount||0),createdAt:o.createdAt,lockedAt:o.lockedAt,updatedAt:o.updatedAt,boxes,uploads,extras,financial:orderFinancial(o,ctx)};
@@ -355,15 +355,18 @@ function orderSaveDraft(req){allowOrder();const a=getActor(req,'customer');retur
 function orderUploadsFolder(){let id=prop('ORDER_PDF_FOLDER_ID');if(id){try{return DriveApp.getFolderById(id);}catch(e){}}
  try{const f=DriveApp.createFolder('Jay Ganesh Agency – Order PDF lists (private)');PropertiesService.getScriptProperties().setProperties({ORDER_PDF_FOLDER_ID:f.getId()});return f;}
  catch(e){fail('Google Drive is not connected to your Apps Script yet ('+String(e&&e.message||e).slice(0,160)+'). Ask Main Admin to run setupOrderUploads in Apps Script and deploy a new version.','SETUP');}}
+function ensureHeader(name){const s=sheet(name),keys=HEADERS[name],head=s.getRange(1,1,1,keys.length).getDisplayValues()[0];keys.forEach((k,i)=>{if(!head[i])s.getRange(1,i+1,1,1).setValues([[k]]);});}
 function orderUpload(req){allowOrder();const a=getActor(req,'customer');
+ const declared=Number(req.declaredListValue);if(!wholeMoney(declared)||declared<=0||declared>10000000)fail('Enter the total advertised value written on this PDF list');
  const b64=String(req.fileBase64||'');if(!b64||b64.length>4200000)fail('PDF must be smaller than 3 MB');
  let bytes;try{bytes=Utilities.base64Decode(b64);}catch(e){fail('A valid PDF file is required');}
  const magic=String.fromCharCode.apply(null,bytes.slice(0,5).map(n=>n<0?n+256:n));if(magic!=='%PDF-')fail('A valid PDF file is required');
  return locked(()=>{const o=myOwnOrder(a,req.orderId);if(o.status!=='Draft')fail('Locked order uploads cannot be changed','CONFLICT');if(o.type==='Only Box')fail('This order does not include a PDF list. Change the order type first.');
   const existing=all('Order_Uploads').filter(x=>String(x.orderId)===String(o.id));if(existing.length>=Number(o.listCount))fail('All '+o.listCount+' PDF list(s) are already uploaded','CONFLICT');
   const name=o.id+'_'+uid('LIST')+'.pdf';const file=orderUploadsFolder().createFile(Utilities.newBlob(bytes,'application/pdf',name));file.setDescription('Private customer PDF list for order '+o.id);
-  const row={id:uid('FILE'),orderId:o.id,driveFileId:file.getId(),filename:name,originalFilename:safe(String(req.filename||'list.pdf').replace(/[\\/]/g,''),150),advertisedListValue:'',status:'Pending',approvedBy:'',approvedAt:'',createdAt:stamp()};
-  put('Order_Uploads',row);audit(a.customerId,'order.uploadPdf','Orders',o.id,null,{file:name},'');refreshOrderStatus(o);return {id:row.id,status:'Pending'};});}
+  const row={id:uid('FILE'),orderId:o.id,driveFileId:file.getId(),filename:name,originalFilename:safe(String(req.filename||'list.pdf').replace(/[\\/]/g,''),150),advertisedListValue:'',status:'Pending',approvedBy:'',approvedAt:'',createdAt:stamp(),declaredListValue:declared};
+  ensureHeader('Order_Uploads');
+  put('Order_Uploads',row);audit(a.customerId,'order.uploadPdf','Orders',o.id,null,{file:name,declaredListValue:declared},'');refreshOrderStatus(o);return {id:row.id,status:'Pending'};});}
 function orderLock(req){allowOrder();const a=getActor(req,'customer');return locked(()=>{const o=myOwnOrder(a,req.orderId);if(o.status!=='Draft')fail('Already locked','CONFLICT');
  const ctx=orderContext(),boxes=ctx.boxes.filter(x=>String(x.orderId)===String(o.id)&&Number(x.quantity)>0),uploads=ctx.uploads.filter(x=>String(x.orderId)===String(o.id));
  if(o.type!=='Only List'&&!boxes.length)fail('Select at least one box');if(o.type!=='Only Box'&&uploads.length!==Number(o.listCount))fail('Upload all '+o.listCount+' PDF list(s) before locking');
