@@ -22,7 +22,13 @@ const legallyCleared=()=>operationsAllowed()&&process.env.FIREWORKS_LEGAL_CLEARA
 const now=()=>new Date().toISOString(),id=p=>`${p}-${crypto.randomBytes(7).toString('hex').toUpperCase()}`;
 const publicPath=path.join(path.dirname(fileURLToPath(import.meta.url)),'../public');
 const csrfMethods=new Set(['POST','PUT','PATCH','DELETE']);
-app.disable('x-powered-by');app.set('trust proxy',process.env.TRUST_PROXY==='true'?1:false);
+app.disable('x-powered-by');app.set('trust proxy',(process.env.TRUST_PROXY==='true'||process.env.VERCEL)?1:false);
+// Wait for the Google Sheet connection before handling API calls (matters on
+// Vercel, where each cold start connects again). Retry a failed connection
+// at most every 30 seconds so a fixed setting takes effect without a redeploy.
+let ready=Promise.resolve(),lastInitTry=0;
+function startInit(){lastInitTry=Date.now();sheetInitError=null;ready=init().catch(err=>{sheetInitError=err;console.error('Google integration not ready:',err.message)});return ready}
+app.use('/api',async(req,res,next)=>{if(enabled&&!store&&sheetInitError&&Date.now()-lastInitTry>30000)startInit();await ready;next()});
 app.use(helmet({contentSecurityPolicy:false}));app.use(express.json({limit:'100kb'}));app.use(cookieParser());
 app.use('/api',rateLimit({windowMs:15*60*1000,limit:350,standardHeaders:'draft-7',legacyHeaders:false}));
 app.use((req,res,next)=>{if(csrfMethods.has(req.method)&&req.path.startsWith('/api/')){const origin=req.get('origin');const host=req.get('x-forwarded-host')||req.get('host');if(origin){let o;try{o=new URL(origin)}catch{return res.status(403).json({error:'Invalid request origin'})}if(o.host!==host)return res.status(403).json({error:'Cross-origin request blocked'})}if(req.get('x-jga-request')!=='1')return res.status(403).json({error:'Missing request-verification header'})}next()});
@@ -125,4 +131,6 @@ app.use('/api',(req,res)=>json(res,404,{error:'Unknown API path'}));
 app.use(express.static(publicPath,{extensions:['html'],setHeaders:(res,file)=>{if(file.endsWith('.html'))res.setHeader('Cache-Control','no-store')}}));
 app.get('*',(req,res)=>res.sendFile(path.join(publicPath,'index.html')));
 app.use((err,req,res,next)=>{const status=err.code==='LIMIT_FILE_SIZE'?413:(err.status||500);if(status===500)console.error('API error',err);res.status(status).json({error:status===500?'Internal server error':err.message})});
-init().catch(err=>{sheetInitError=err;console.error('Google integration not ready:',err.message)}).finally(()=>app.listen(port,()=>console.log(`Jay Ganesh Agency preview: http://localhost:${port}; Sheets ${store?'connected':'inactive'}`)));
+startInit();
+if(!process.env.VERCEL)ready.finally(()=>app.listen(port,()=>console.log(`Jay Ganesh Agency: http://localhost:${port}; Sheets ${store?'connected':'inactive'}`)));
+export default app;

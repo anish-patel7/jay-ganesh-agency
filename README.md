@@ -16,6 +16,21 @@ The site at `/` is now the **live portal**: it talks to the Node server, which s
 4. Deploy. When it finishes, open the `https://….onrender.com` link. The badge at the top should say **Google Sheet connected**, and the server creates all worksheets (Customers, Payments, Groups…) in your sheet automatically.
 5. Log in with the admin mobile and password. The admin area has Overview, Registrations (approve/reject), Customers and Groups.
 
+### Hosting on Vercel instead (free Hobby plan, non-commercial)
+
+The repo also works on Vercel: `vercel.json` serves `public/` and runs the backend from `api/index.js`. In Vercel → Project → **Settings → Environment Variables**, add:
+
+| Name | Value |
+|---|---|
+| `SERVER_ENABLED` | `true` |
+| `GOOGLE_SHEETS_ID` | sheet ID |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | entire contents of the service-account `.json` file |
+| `SESSION_SECRET` | any random text, 32+ characters |
+| `ADMIN_MOBILE` | 10-digit admin mobile |
+| `ADMIN_PASSWORD` | admin password, 10+ characters |
+
+Then **Deployments → ⋯ → Redeploy**, because Vercel only applies new environment variables to new deployments.
+
 `OPERATIONS_ENABLED`, `POLICY_APPROVED` and `FIREWORKS_LEGAL_CLEARANCE` stay `false` until you want customers to register, pay or order. To change any setting later, use Render → your service → **Environment**.
 
 Free Render services sleep after 15 minutes without visitors, so the first visit after that takes about 30 seconds.
