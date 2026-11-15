@@ -1,0 +1,16 @@
+> Historical changelog: the 12-character password design was replaced by the 4-digit customer PIN on 15 Nov 2026. See CHANGELOG_4_DIGIT_PIN.md.
+
+## Customer login and returning next month (15 Nov 2026)
+
+**Recommended live flow:** customer registers with a unique 10-digit mobile number and a password of at least 12 characters. Registration stays **Pending Approval**. After Main Admin approval, the **same mobile + password** opens the same permanent `Customer ID` whenever the customer returns; no monthly re-registration and no OTP required. Customer history, group and EMI records are keyed by Customer ID, **never just by a name**. A login session expires after 12 hours; the customer can log in again with the same credentials. Duplicate mobile registrations are rejected.
+
+**In the HTML preview:** there is now a **Customer login** link, a **Create password** field in registration, and a sign-out button. Newly registered demo accounts can be approved under Main Admin → Registrations; then their mobile+password opens their OWN demo customer account in that browser. Login data is simulated in `localStorage`, session in `sessionStorage`, using a PBKDF2-derived demonstration verifier. Browser data can be erased and does not sync between devices. **Do not register real personal data or enter a real password in this preview.** The sample customer can still be opened using a clearly labeled demo shortcut.
+
+**Backend source change:** `POST /api/registration` now requires `password` (12–128 characters) and stores only a salted `scrypt` hash in an inactive `Auth_Users` record. `POST /api/admin/registrations/:id/approve` activates that same account, preserving the registration password, and returns a permanent Customer ID. `POST /api/auth/login` checks the hash and blocks pending accounts, rather than creating replacement credentials upon approval.
+
+**Existing registrations created before a password was established:** no system can safely assume a caller owns a mobile number without authentication. Such accounts need manual verified migration or administrative account provisioning; the backend intentionally refuses to activate a passwordless legacy request. For an already-approved account with a forgotten password, Main Admin can verify identity **offline** and call `POST /api/admin/accounts/:customerId/reset-password` (reason required); it returns a random temporary password once. A temporary password requires a password change before access to other protected routes. Changing or resetting a password invalidates previously issued customer sessions. Independent security review and a secure reset delivery method are still required.
+
+**Limitations:** No OTP means ownership of a mobile number is not automatically verified. Main Admin should check identity and number ownership before approving registration or resetting passwords. The preview's role switcher is demonstrative only, not authorization. The web frontend is not yet connected to the actual Google backend; real cross-device login and records require deployment and backend integration.
+
+
+For old registrations, Main Admin has a **Create demo login** workflow on the Registrations page, and the backend exposes `POST /api/admin/accounts/legacy-provision` for verified legacy records. Neither automatically trusts a bare mobile number.
