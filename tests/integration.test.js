@@ -179,3 +179,68 @@ test('Admin Settings controls are server-side, require approvals, and are audit 
  assert.equal(s.success('status').refundsEnabled,false);
  assert.ok(s.sheets.get('Audit_Log').rows.some(r=>r[2]==='settings.update'));
 });
+
+
+test('Group Leader participates in own EMI without self-approval; Admin verifies only consolidated remittance',()=>{
+ const s=sandbox(),admin=asUser(s.success('login',{mobile:MOBILE,password:'strong admin password test 2027'}));
+ const leaderId=approved(s,signup(s,'Scheme Leader','9876500131','1234',700).registrationId,admin);
+ const memberId=approved(s,signup(s,'Scheme Member','9876500132','2222',500).registrationId,admin);
+ const g=s.success('admin.groupCreate',{name:'Inclusive Group'},admin).group;
+ for(const id of [leaderId,memberId])s.success('admin.assign',{groupId:g.id,customerId:id},admin);
+ s.success('admin.appointLeader',{groupId:g.id,customerId:leaderId},admin);
+ const leader=asUser(s.success('login',{mobile:'9876500131',pin:'1234'}));
+ const member=asUser(s.success('login',{mobile:'9876500132',pin:'2222'}));
+ assert.equal(leader.role,'leader');
+ assert.equal(s.success('customer.dashboard',{},leader).customer.id,leaderId);
+ assert.equal(s.success('customer.dashboard',{},leader).verifiedCash,0);
+ assert.equal(s.success('admin.overview',{},admin).monthlyGroupEmi,1200);
+ const own=s.success('customer.payment',{installment:1,amount:1050,mode:'Cash'},leader).payment;
+ const other=s.success('customer.payment',{installment:1,amount:750,mode:'Online'},member).payment;
+ assert.equal(own.status,'Leader Self-Declared');
+ assert.equal(other.status,'Awaiting Leader');
+ assert.equal(s.send('leader.ackPayment',{id:own.id},leader).code,'FORBIDDEN');
+ assert.equal(s.send('leader.rejectPayment',{id:own.id},leader).code,'FORBIDDEN');
+ assert.equal(s.success('leader.ackPayment',{id:other.id},leader).status,'Leader Verified');
+ const queue=s.success('leader.queue',{},leader);
+ assert.equal(queue.group.members,2);
+ assert.equal(queue.group.totalMonthlyEmi,1200);
+ assert.equal(queue.payments.find(x=>x.id===own.id).isOwnPayment,true);
+ assert.equal(queue.payments.find(x=>x.id===other.id).isOwnPayment,false);
+ const batch=s.success('leader.collection',{paymentIds:[own.id,other.id],remittanceMethod:'Cash'},leader).collection;
+ assert.equal(batch.amount,1800);
+ assert.equal(s.success('customer.dashboard',{},leader).verifiedCash,0);
+ assert.equal(s.success('admin.collections',{},admin).collections[0].amount,1800);
+ s.success('admin.verifyCollection',{id:batch.id},admin);
+ assert.equal(s.success('customer.dashboard',{},leader).verifiedCash,1050);
+ assert.equal(s.success('customer.dashboard',{},member).verifiedCash,750);
+ assert.equal(s.success('leader.queue',{},leader).group.verifiedCash,1800);
+ assert.equal(s.success('admin.overview',{},admin).pendingCollections,0);
+});
+
+test('Rejected group collection restores leader self-declared payment distinctly',()=>{
+ const s=sandbox(),admin=asUser(s.success('login',{mobile:MOBILE,password:'strong admin password test 2027'}));
+ const leaderId=approved(s,signup(s,'Scheme Leader','9876500133','1234',500).registrationId,admin);
+ const g=s.success('admin.groupCreate',{name:'Own Payment Group'},admin).group;
+ s.success('admin.assign',{groupId:g.id,customerId:leaderId},admin);
+ s.success('admin.appointLeader',{groupId:g.id,customerId:leaderId},admin);
+ const leader=asUser(s.success('login',{mobile:'9876500133',pin:'1234'}));
+ const own=s.success('customer.payment',{installment:2,amount:500,mode:'Cash'},leader).payment;
+ const batch=s.success('leader.collection',{paymentIds:[own.id],remittanceMethod:'Cash'},leader).collection;
+ s.success('admin.rejectCollection',{id:batch.id,reason:'No remittance received'},admin);
+ const payment=s.success('leader.queue',{},leader).payments.find(x=>x.id===own.id);
+ assert.equal(payment.status,'Leader Self-Declared');
+ assert.equal(s.success('customer.dashboard',{},leader).verifiedCash,0);
+});
+
+test('Leader payment recorded under old code is still eligible without self-approval',()=>{
+ const s=sandbox(),admin=asUser(s.success('login',{mobile:MOBILE,password:'strong admin password test 2027'}));
+ const leaderId=approved(s,signup(s,'Existing Scheme Leader','9876500134','1234',500).registrationId,admin);
+ const g=s.success('admin.groupCreate',{name:'Old Pending Group'},admin).group;
+ s.success('admin.assign',{groupId:g.id,customerId:leaderId},admin);s.success('admin.appointLeader',{groupId:g.id,customerId:leaderId},admin);
+ const leader=asUser(s.success('login',{mobile:'9876500134',pin:'1234'}));
+ const own=s.success('customer.payment',{installment:2,amount:500,mode:'Cash'},leader).payment;
+ const paySheet=s.sheets.get('Payments'); const statusColumn=paySheet.rows[0].indexOf('status');paySheet.rows[1][statusColumn]='Awaiting Leader';
+ assert.equal(s.send('leader.ackPayment',{id:own.id},leader).code,'FORBIDDEN');
+ const batch=s.success('leader.collection',{paymentIds:[own.id],remittanceMethod:'Cash'},leader).collection;
+ assert.equal(batch.amount,500);
+});

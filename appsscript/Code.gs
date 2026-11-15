@@ -58,11 +58,14 @@ function settingEnabled(key,legacyDefault){const r=one('Settings',key,'key');ret
 function openWindow(start,end){const d=dateIST();return d>=start&&d<=end;}
 function siteSettings(){
  const legacyPolicy=prop('POLICY_APPROVED')==='true',legacyEnabled=prop('OPERATIONS_ENABLED')==='true';
- const rTerms=settingEnabled('registrationTermsConfirmed',legacyPolicy);
- const pPolicy=settingEnabled('paymentPolicyConfirmed',legacyPolicy);
- const registrationEnabled=settingEnabled('registrationEnabled',legacyEnabled);
- const paymentEntriesEnabled=settingEnabled('paymentEntriesEnabled',legacyEnabled);
- const groupCollectionsEnabled=settingEnabled('groupCollectionsEnabled',legacyEnabled);
+ // Read Settings in one Sheets request instead of opening the worksheet five times.
+ const saved=Object.fromEntries(all('Settings').map(x=>[String(x.key),String(x.value)==='true']));
+ const enabled=(key,fallback)=>Object.prototype.hasOwnProperty.call(saved,key)?saved[key]:fallback;
+ const rTerms=enabled('registrationTermsConfirmed',legacyPolicy);
+ const pPolicy=enabled('paymentPolicyConfirmed',legacyPolicy);
+ const registrationEnabled=enabled('registrationEnabled',legacyEnabled);
+ const paymentEntriesEnabled=enabled('paymentEntriesEnabled',legacyEnabled);
+ const groupCollectionsEnabled=enabled('groupCollectionsEnabled',legacyEnabled);
  const registrationWithinDates=openWindow('2026-11-09','2026-11-30');
  const paymentWithinDates=openWindow('2026-11-09','2027-07-31');
  return {
@@ -170,12 +173,25 @@ function submitPayment(req){allowPayment();const a=getActor(req,'customer');retu
  if(!Number.isInteger(installment)||installment<1||installment>9||!['Cash','Online'].includes(mode))fail('Invalid installment or mode');
  const due=Number(c.emi)*(installment===1?1.5:1),used=all('Payments').filter(x=>x.customerId===c.id&&Number(x.installment)===installment&&!['Leader Rejected','Rejected'].includes(x.status)).reduce((s,x)=>s+Number(x.amount),0);
  if(Math.round((used+amount)*100)>Math.round(due*100))fail('Amount exceeds remaining installment amount','CONFLICT');
- const p={id:uid('PAY'),customerId:c.id,orderId:'',kind:'EMI',installment,amount,mode,recipientId:g.leaderCustomerId,status:'Awaiting Leader',submittedBy:c.id,createdAt:stamp(),reference,leaderApprovedBy:'',leaderApprovedAt:'',leaderRejectedAt:'',batchId:''};put('Payments',p);
- audit(c.id,'payment.submit','Payments',p.id,null,{amount,installment,mode},'');return {payment:paymentView(p)};
+ const p={id:uid('PAY'),customerId:c.id,orderId:'',kind:'EMI',installment,amount,mode,recipientId:g.leaderCustomerId,status:c.id===g.leaderCustomerId?'Leader Self-Declared':'Awaiting Leader',submittedBy:c.id,createdAt:stamp(),reference,leaderApprovedBy:'',leaderApprovedAt:'',leaderRejectedAt:'',batchId:''};put('Payments',p);
+ audit(c.id,'payment.submit','Payments',p.id,null,{amount,installment,mode,status:p.status},'');return {payment:paymentView(p)};
 });}
-function leaderQueue(req){const a=getActor(req,'leader'),g=groupOfLeader(a),members=all('Customers').filter(c=>c.groupId===g.id);const payments=all('Payments').filter(p=>members.some(c=>c.id===p.customerId));return {group:groupSummary().find(x=>x.id===g.id),members:members.map(publicCustomer),payments:payments.map(p=>Object.assign(paymentView(p),{memberName:(members.find(c=>c.id===p.customerId)||{}).name||''})),collections:all('Group_Collections').filter(x=>x.groupId===g.id).map(collectionView)};}
+function leaderQueue(req){
+ const a=getActor(req,'leader'),g=groupOfLeader(a);
+ const members=all('Customers').filter(c=>c.groupId===g.id);
+ const memberById=Object.fromEntries(members.map(c=>[String(c.id),c]));
+ const payments=all('Payments').filter(p=>Object.prototype.hasOwnProperty.call(memberById,String(p.customerId)));
+ // Compute group total from the rows already fetched, not another groupSummary() read.
+ const group={id:g.id,name:g.name,leaderCustomerId:g.leaderCustomerId,reference:g.reference,
+  members:members.length,totalMonthlyEmi:members.reduce((s,c)=>s+Number(c.emi||0),0),
+  verifiedCash:payments.filter(p=>p.status==='Verified').reduce((s,p)=>s+Number(p.amount||0),0)};
+ return {group,members:members.map(publicCustomer),leaderCustomerId:a.customerId,
+  payments:payments.map(p=>Object.assign(paymentView(p),{memberName:memberById[String(p.customerId)].name||'',isOwnPayment:String(p.customerId)===String(a.customerId)})),
+  collections:all('Group_Collections').filter(x=>x.groupId===g.id).map(collectionView)};
+}
 function reviewPayment(req,approve){allowGroupCollection();const a=getActor(req,'leader');return locked(()=>{
- const g=groupOfLeader(a),p=one('Payments',req.id),c=p&&one('Customers',p.customerId);if(!p||!c||c.groupId!==g.id||p.status!=='Awaiting Leader')fail('This payment is not awaiting your review','CONFLICT');
+ const g=groupOfLeader(a),p=one('Payments',req.id),c=p&&one('Customers',p.customerId);if(!p||!c||c.groupId!==g.id||!['Awaiting Leader','Leader Self-Declared'].includes(p.status))fail('This payment is not awaiting your review','CONFLICT');
+ if(String(p.customerId)===String(a.customerId))fail('You cannot approve your own payment. Add it to a group collection and let Main Admin verify the combined remittance.','FORBIDDEN');
  const next=approve?'Leader Verified':'Leader Rejected';change('Payments',p.id,{status:next,leaderApprovedBy:approve?a.customerId:'',leaderApprovedAt:approve?stamp():'',leaderRejectedAt:approve?'':stamp()});
  audit(a.customerId,'payment.'+(approve?'acknowledge':'reject'),'Payments',p.id,{status:p.status},{status:next},safe(req.reason,150));return {status:next};
 });}
@@ -183,20 +199,32 @@ function collectionView(b){return {id:b.id,groupId:b.groupId,leaderId:b.leaderId
 function createCollection(req){allowGroupCollection();const a=getActor(req,'leader');return locked(()=>{
  const g=groupOfLeader(a),members=all('Customers').filter(c=>c.groupId===g.id).map(c=>c.id),ids=Array.isArray(req.paymentIds)?req.paymentIds.map(String):[];
  if(!ids.length||ids.length>100||new Set(ids).size!==ids.length)fail('Select acknowledged payments');
- const eligible=all('Payments').filter(p=>ids.includes(p.id)&&members.includes(p.customerId)&&p.status==='Leader Verified');if(eligible.length!==ids.length)fail('Payment selection changed; refresh','CONFLICT');
+ // Member payments require independent leader acknowledgement; leader's own payment
+ // may only be self-declared and is verified ONLY as part of the Admin-approved total.
+ const eligible=all('Payments').filter(p=>ids.includes(p.id)&&members.includes(p.customerId)&&(
+   p.status==='Leader Verified'||(String(p.customerId)===String(a.customerId)&&['Leader Self-Declared','Awaiting Leader'].includes(p.status))));
+ if(eligible.length!==ids.length)fail('Payment selection changed; refresh','CONFLICT');
  const method=safe(req.remittanceMethod,20),reference=safe(req.remittanceReference,150);if(!['Cash','Online'].includes(method))fail('Choose remittance method');
  const amount=Math.round(eligible.reduce((sum,p)=>sum+Number(p.amount),0)*100)/100;
  const b={id:uid('COL'),groupId:g.id,leaderId:a.customerId,amount,paymentIds:ids.join(','),remittanceMethod:method,remittanceReference:reference,status:'Awaiting Admin',createdAt:stamp()};put('Group_Collections',b);
  for(const p of eligible)change('Payments',p.id,{status:'In Group Submission',batchId:b.id});audit(a.customerId,'collection.submit','Group_Collections',b.id,null,{groupId:g.id,amount,paymentIds:ids},'');return {collection:collectionView(b)};
 });}
 function adminCollections(req){getActor(req,'admin');const groups=groupSummary(),rows=all('Group_Collections');return {collections:rows.map(b=>Object.assign(collectionView(b),{groupName:(groups.find(g=>g.id===b.groupId)||{}).name||b.groupId}))};}
+function adminOverview(req){
+ getActor(req,'admin');const registrations=all('Registration_Requests'),customers=all('Customers'),groups=all('Groups'),collections=all('Group_Collections');
+ const groupIds=new Set(groups.map(g=>String(g.id)));
+ return {pendingRegistrations:registrations.filter(x=>x.status==='Pending Approval').length,
+  customers:customers.length,groups:groups.length,
+  monthlyGroupEmi:customers.filter(c=>groupIds.has(String(c.groupId))).reduce((s,c)=>s+Number(c.emi||0),0),
+  pendingCollections:collections.filter(x=>x.status==='Awaiting Admin').length};
+}
 function reviewCollection(req,approved){getActor(req,'admin');return locked(()=>{
  const b=one('Group_Collections',req.id);if(!b||b.status!=='Awaiting Admin')fail('This collection is not awaiting verification','CONFLICT');
  const ids=String(b.paymentIds).split(',').filter(Boolean),ps=all('Payments').filter(p=>ids.includes(p.id));
  if(ps.length!==ids.length||ps.some(p=>p.batchId!==b.id||p.status!=='In Group Submission'))fail('Payment rows do not match collection; stop for reconciliation','CONFLICT');
  const sum=Math.round(ps.reduce((s,p)=>s+Number(p.amount),0)*100)/100;if(sum!==Number(b.amount))fail('Collection total mismatch; stop for reconciliation','CONFLICT');
  if(approved){for(const p of ps)change('Payments',p.id,{status:'Verified',verifiedAt:stamp(),verifiedBy:'admin'});change('Group_Collections',b.id,{status:'Verified',verifiedAt:stamp(),verifiedBy:'admin'});}
- else{for(const p of ps)change('Payments',p.id,{status:'Leader Verified',batchId:''});change('Group_Collections',b.id,{status:'Rejected',rejectedAt:stamp(),rejectedBy:'admin',reason:safe(req.reason,200)});}
+ else{for(const p of ps)change('Payments',p.id,{status:String(p.customerId)===String(b.leaderId)?'Leader Self-Declared':'Leader Verified',batchId:''});change('Group_Collections',b.id,{status:'Rejected',rejectedAt:stamp(),rejectedBy:'admin',reason:safe(req.reason,200)});}
  audit('admin',approved?'collection.verify':'collection.reject','Group_Collections',b.id,{status:b.status},{status:approved?'Verified':'Rejected',amount:b.amount},safe(req.reason,200));return {status:approved?'Verified':'Rejected'};
 });}
 function resetPin(req){getActor(req,'admin');return locked(()=>{if(req.identityVerified!==true||safe(req.reason,200).length<10)fail('Confirm identity and write a reason (at least 10 characters)');
@@ -217,6 +245,7 @@ function run(action,req){preflight();req.allowPinChange=action==='me'||action===
  case 'login':return login(req);
  case 'me':return currentUser(req);
  case 'registration':return register(req);
+ case 'admin.overview':return adminOverview(req);
  case 'admin.settings':return adminSettings(req);
  case 'admin.updateSetting':return updateAdminSetting(req);
  case 'admin.registrations':return adminRegistrations(req);
