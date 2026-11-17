@@ -38,6 +38,12 @@ function fail(message,code){const e=new Error(message);e.code=code||'BAD_REQUEST
 function uid(prefix){return prefix+'-'+Utilities.getUuid().replace(/-/g,'').slice(0,14).toUpperCase();}
 function stamp(){return new Date().toISOString();}
 function dateIST(){return Utilities.formatDate(new Date(),TZ,'yyyy-MM-dd');}
+/** Mobile numbers as 10 plain digits. Google Sheets may store them as numbers, and people type +91, 0, spaces or dashes. */
+function normMobile(x){let d=String(x==null?'':x).replace(/\D/g,'');if(d.length===12&&d.startsWith('91'))d=d.slice(2);else if(d.length===11&&d.startsWith('0'))d=d.slice(1);return d;}
+/** Where this mobile number is already used, or '' if it is free. */
+function mobileInUse(mobile,ignoreRegId){const m=normMobile(mobile);if(!m)return '';if(m===normMobile(prop('ADMIN_MOBILE')))return 'admin';
+ if(all('Customers').some(x=>normMobile(x.mobile)===m))return 'customer';if(all('Auth_Users').some(x=>normMobile(x.mobile)===m))return 'login';
+ if(all('Registration_Requests').some(x=>normMobile(x.mobile)===m&&x.status!=='Rejected'&&String(x.id)!==String(ignoreRegId||'')))return 'pending';return '';}
 function isMobile(x){return /^[6-9][0-9]{9}$/.test(String(x||''));}
 function isPin(x){return /^[0-9]{4}$/.test(String(x||''));}
 function money(x){let n=Number(x);if(!Number.isFinite(n)||n<=0||n>10000000||Math.round(n*100)!==n*100)fail('Invalid payment amount');return Math.round(n*100)/100;}
@@ -124,11 +130,11 @@ function attemptKey(m){return 'mobile:'+m;}
 function checkAttempt(m){const x=one('Login_Attempts',attemptKey(m),'key');if(x&&Date.parse(x.lockedUntil||'')>Date.now())fail('Too many attempts. Try again later.','RATE_LIMIT');}
 function registerFailure(m){const key=attemptKey(m),x=one('Login_Attempts',key,'key'),count=Number(x&&x.failures||0)+1,patch={failures:count>=5?0:count,lockedUntil:count>=5?new Date(Date.now()+30*60000).toISOString():'',updatedAt:stamp()};if(x)change('Login_Attempts',key,patch,'key');else put('Login_Attempts',Object.assign({key},patch));}
 function clearFailure(m){const x=one('Login_Attempts',attemptKey(m),'key');if(x)change('Login_Attempts',attemptKey(m),{failures:0,lockedUntil:'',updatedAt:stamp()},'key');}
-function login(req){return locked(()=>{const mobile=safe(req.mobile,10),password=String(req.password||req.pin||'');if(!isMobile(mobile))fail('Wrong mobile number or PIN / password','UNAUTHORIZED');checkAttempt(mobile);
-  if(mobile===prop('ADMIN_MOBILE')){
+function login(req){return locked(()=>{const mobile=normMobile(req.mobile),password=String(req.password||req.pin||'');if(!isMobile(mobile))fail('Wrong mobile number or PIN / password','UNAUTHORIZED');checkAttempt(mobile);
+  if(mobile===normMobile(prop('ADMIN_MOBILE'))){
     const salt=prop('ADMIN_PASSWORD_SALT'),hash=prop('ADMIN_PASSWORD_HASH');const ok=salt&&hash&&password.length>=14&&equals(pinDigest(password,salt),hash);
     if(!ok){registerFailure(mobile);fail('Wrong mobile number or PIN / password','UNAUTHORIZED');}
-    clearFailure(mobile);return {role:'admin',mobile,authRev:prop('ADMIN_REV')||'1'};
+    clearFailure(mobile);return {role:'admin',mobile:prop('ADMIN_MOBILE'),authRev:prop('ADMIN_REV')||'1'};
   }
   const u=one('Auth_Users',mobile,'mobile');if(!u||String(u.active)!=='true'||!isPin(password)||!equals(pinDigest(password,u.passwordSalt),u.passwordHash)){
     registerFailure(mobile);fail('Wrong mobile number or PIN / password','UNAUTHORIZED');}
@@ -136,15 +142,15 @@ function login(req){return locked(()=>{const mobile=safe(req.mobile,10),password
   clearFailure(mobile);return {role:roleOf(u.customerId),mobile,customerId:u.customerId,authRev:String(u.authRev||'1'),mustChangePin:String(u.mustChangePassword)==='true'};
 });}
 function register(req){allowRegistration();return locked(()=>{
- const name=safe(req.name,100),mobile=safe(req.mobile,10),ref=safe(req.reference,100),emi=Number(req.emi),pin=String(req.pin||'');
+ const name=safe(req.name,100),mobile=normMobile(req.mobile),ref=safe(req.reference,100),emi=Number(req.emi),pin=String(req.pin||'');
  if(name.length<2||!isMobile(mobile)||!ref||!(emi>0&&emi%100===0&&emi<=1000000)||!isPin(pin)||req.acceptedTerms!==true)fail('Check registration fields, 4-digit PIN, EMI and terms');
- if(mobile===prop('ADMIN_MOBILE')||all('Customers').some(x=>x.mobile===mobile)||all('Registration_Requests').some(x=>x.mobile===mobile&&x.status!=='Rejected'))fail('Mobile number already registered','CONFLICT');
+ const used=mobileInUse(mobile);if(used)fail(used==='pending'?'This mobile number already has a registration waiting for Main Admin approval. Please wait for approval or contact Main Admin.':'This mobile number is already registered. Please log in with it, or contact Main Admin if you forgot your PIN.','CONFLICT');
  const h=hashPin(pin),r={id:uid('REG'),name,mobile,reference:ref,emi,comments:safe(req.comments,300),acceptedTerms:'true',status:'Pending Approval',createdAt:stamp(),pinSalt:h.salt,pinHash:h.hash};
  put('Registration_Requests',r);audit('customer-registration','registration.create','Registration_Requests',r.id,null,{mobile,name},'');return {registrationId:r.id,status:r.status};
 });}
 function approve(req){getActor(req,'admin');return locked(()=>{
  const r=one('Registration_Requests',req.id);if(!r||r.status!=='Pending Approval')fail('Registration no longer pending','CONFLICT');
- if(all('Customers').some(x=>x.mobile===r.mobile))fail('Customer already exists','CONFLICT');
+ {const used=mobileInUse(r.mobile,r.id);if(used==='customer'||used==='login'||used==='admin')fail('This mobile number already belongs to an existing customer or login. Reject this duplicate registration.','CONFLICT');if(used==='pending')fail('Another registration with this mobile number is also pending. Approve only one and reject the other.','CONFLICT');}
  const id=uid('JGA'),now=stamp();put('Customers',{id,name:r.name,mobile:r.mobile,reference:r.reference,emi:r.emi,groupId:'',bonusApproved:'false',status:'Approved',createdAt:now});
  const h=r.pinSalt&&r.pinHash?{salt:r.pinSalt,hash:r.pinHash}:hashPin(String(Math.floor(Math.random()*10000)).padStart(4,'0'));
  put('Auth_Users',{id:uid('USR'),mobile:r.mobile,passwordSalt:h.salt,passwordHash:h.hash,role:'customer',customerId:id,active:'true',createdAt:now,authRev:'1',mustChangePassword:(!r.pinSalt||!r.pinHash)?'true':'false'});
