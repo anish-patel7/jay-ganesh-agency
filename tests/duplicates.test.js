@@ -58,3 +58,20 @@ test('rejected registration frees the number; existing duplicate rows cannot bot
  assert.ok(s.success('admin.approve',{id:pend[0].id},admin).customerId);
  assert.equal(s.success('admin.customers',{},admin).customers.length,1,'only one customer for the number');
 });
+test('group change: reason required, blocked with open payments or for a leader, history kept',()=>{
+ const s=sandbox(),admin=asUser(s.success('login',{mobile:MOBILE,password:PW}));
+ s.success('admin.updateSetting',{key:'paymentPolicyConfirmed',enabled:true,acknowledged:true},admin);s.success('admin.updateSetting',{key:'paymentEntriesEnabled',enabled:true},admin);
+ const ids=['9100000001','9100000002'].map(m=>s.success('admin.approve',{id:reg(s,m).data.registrationId},admin).customerId);
+ const g1=s.success('admin.groupCreate',{name:'North Group'},admin).group,g2=s.success('admin.groupCreate',{name:'South Group'},admin).group;
+ s.success('admin.assign',{customerId:ids[0],groupId:g1.id},admin);s.success('admin.assign',{customerId:ids[1],groupId:g1.id},admin);
+ assert.equal(s.send('admin.assign',{customerId:ids[0],groupId:g1.id},admin).code,'CONFLICT','already in that group');
+ assert.equal(s.send('admin.assign',{customerId:ids[0],groupId:g2.id},admin).code,'BAD_REQUEST','reason needed to change');
+ s.success('admin.appointLeader',{groupId:g1.id,customerId:ids[1]},admin);
+ const cust=asUser(s.success('login',{mobile:'9100000001',pin:'0427'}));s.success('customer.payment',{installment:1,amount:1500,mode:'Cash'},cust);
+ const blocked=s.send('admin.assign',{customerId:ids[0],groupId:g2.id,reason:'Moved to another area'},admin);assert.equal(blocked.code,'CONFLICT');assert.match(blocked.error,/still being processed/);
+ assert.equal(s.send('admin.assign',{customerId:ids[1],groupId:g2.id,reason:'Moved to another area'},admin).code,'CONFLICT','leader must be replaced first');
+ const leader=asUser(s.success('login',{mobile:'9100000002',pin:'0427'}));const p=s.success('leader.queue',{},leader).payments[0];s.success('leader.rejectPayment',{id:p.id,reason:'Entered by mistake'},leader);
+ assert.equal(s.success('admin.assign',{customerId:ids[0],groupId:g2.id,reason:'Moved to another area'},admin).groupId,g2.id);
+ const mem=s.sheets.get('Group_Memberships').rows.slice(1).filter(r=>r[1]===ids[0]);assert.equal(mem.length,2,'old and new membership kept');assert.ok(mem[0][4],'old membership ended');
+ assert.ok(s.sheets.get('Audit_Log').rows.some(r=>r.includes('group.change')));
+});

@@ -162,10 +162,14 @@ function reject(req){getActor(req,'admin');return locked(()=>{const r=one('Regis
 function createGroup(req){getActor(req,'admin');return locked(()=>{const name=safe(req.name,100);if(name.length<2)fail('Group name required');const g={id:uid('GRP'),name,leaderCustomerId:'',reference:safe(req.reference,100),createdAt:stamp()};put('Groups',g);audit('admin','group.create','Groups',g.id,null,g,'');return {group:g};});}
 function assign(req){getActor(req,'admin');return locked(()=>{
  const c=one('Customers',req.customerId),g=one('Groups',req.groupId);if(!c||!g)fail('Unknown customer or group','NOT_FOUND');const before=c.groupId||'';if(before&&before!==g.id){const previous=one('Groups',before);if(previous&&previous.leaderCustomerId===c.id)fail('Replace this group leader before moving the customer','CONFLICT');}
- if(before===g.id)return {customerId:c.id,groupId:g.id};
- change('Customers',c.id,{groupId:g.id});const mem=all('Group_Memberships').filter(x=>x.customerId===c.id&&!x.endedAt);for(const m of mem)change('Group_Memberships',m.id,{endedAt:stamp()});
- put('Group_Memberships',{id:uid('MEM'),customerId:c.id,groupId:g.id,startedAt:stamp(),endedAt:'',reason:'Admin assignment',changedBy:'admin'});
- audit('admin','group.assign','Customers',c.id,{groupId:before},{groupId:g.id},'');return {customerId:c.id,groupId:g.id};
+ if(before===g.id)fail('This customer is already in '+g.name,'CONFLICT');
+ const moving=!!before,reason=safe(req.reason,200);
+ if(moving){if(reason.length<10)fail('Enter a reason for changing the group (at least 10 characters)');
+  const open=all('Payments').filter(p=>String(p.customerId)===String(c.id)&&['Awaiting Leader','Leader Verified','Leader Self-Declared','In Group Submission'].includes(p.status));
+  if(open.length)fail('This customer has '+open.length+' payment(s) still being processed by the current Group Leader. Finish or reject them (and verify any submitted group collection) before changing the group.','CONFLICT');}
+ change('Customers',c.id,{groupId:g.id});const mem=all('Group_Memberships').filter(x=>String(x.customerId)===String(c.id)&&!x.endedAt);for(const m of mem)change('Group_Memberships',m.id,{endedAt:stamp()});
+ put('Group_Memberships',{id:uid('MEM'),customerId:c.id,groupId:g.id,startedAt:stamp(),endedAt:'',reason:moving?'Group change: '+reason:'Admin assignment',changedBy:'admin'});
+ audit('admin',moving?'group.change':'group.assign','Customers',c.id,{groupId:before},{groupId:g.id},reason);return {customerId:c.id,groupId:g.id};
 });}
 function appoint(req){getActor(req,'admin');return locked(()=>{
  const g=one('Groups',req.groupId),c=one('Customers',req.customerId);if(!g||!c||c.groupId!==g.id)fail('Leader must be a member of this group');
