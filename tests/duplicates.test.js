@@ -75,3 +75,27 @@ test('group change: reason required, blocked with open payments or for a leader,
  const mem=s.sheets.get('Group_Memberships').rows.slice(1).filter(r=>r[1]===ids[0]);assert.equal(mem.length,2,'old and new membership kept');assert.ok(mem[0][4],'old membership ended');
  assert.ok(s.sheets.get('Audit_Log').rows.some(r=>r.includes('group.change')));
 });
+test('Group Leader records EMI for own group members only; it flows into the group collection',()=>{
+ const s=sandbox(),admin=asUser(s.success('login',{mobile:MOBILE,password:PW}));
+ const ids=['9200000001','9200000002','9200000003'].map(m=>s.success('admin.approve',{id:reg(s,m).data.registrationId},admin).customerId);
+ const g1=s.success('admin.groupCreate',{name:'East Group'},admin).group,g2=s.success('admin.groupCreate',{name:'West Group'},admin).group;
+ s.success('admin.assign',{customerId:ids[0],groupId:g1.id},admin);s.success('admin.assign',{customerId:ids[1],groupId:g1.id},admin);s.success('admin.assign',{customerId:ids[2],groupId:g2.id},admin);
+ s.success('admin.appointLeader',{groupId:g1.id,customerId:ids[0]},admin);
+ const leader=asUser(s.success('login',{mobile:'9200000001',pin:'0427'}));
+ const pay=x=>s.send('leader.recordPayment',{installment:1,amount:1500,mode:'Cash',...x},leader);
+ s.success('admin.updateSetting',{key:'paymentEntriesEnabled',enabled:false},admin);
+ assert.equal(pay({customerId:ids[1]}).code,'CLOSED','payments stopped by admin');
+ s.success('admin.updateSetting',{key:'paymentPolicyConfirmed',enabled:true,acknowledged:true},admin);for(const k of ['paymentEntriesEnabled','groupCollectionsEnabled'])s.success('admin.updateSetting',{key:k,enabled:true},admin);
+ assert.equal(pay({customerId:ids[2]}).code,'FORBIDDEN','member of another group');
+ assert.equal(pay({customerId:ids[0]}).code,'CONFLICT','own EMI uses Record my payment');
+ assert.equal(pay({customerId:ids[1],amount:2000}).code,'CONFLICT','more than installment 1 (1.5 x 1000)');
+ const r=s.success('leader.recordPayment',{customerId:ids[1],installment:1,amount:1500,mode:'Cash',reference:'Cash at shop'},leader);assert.equal(r.status,'Leader Verified');
+ assert.equal(pay({customerId:ids[1]}).code,'CONFLICT','installment already fully paid');
+ const cust=asUser(s.success('login',{mobile:'9200000002',pin:'0427'}));
+ assert.equal(s.send('leader.recordPayment',{customerId:ids[1],installment:2,amount:100,mode:'Cash'},cust).code,'FORBIDDEN','customers cannot use it');
+ const mine=s.success('customer.dashboard',{},cust).payments[0];assert.equal(mine.recordedByLeader,true);
+ const q=s.success('leader.queue',{},leader);s.success('leader.collection',{paymentIds:[q.payments[0].id],remittanceMethod:'Cash'},leader);
+ const col=s.success('admin.collections',{},admin).collections[0];s.success('admin.verifyCollection',{id:col.id},admin);
+ assert.equal(s.success('customer.dashboard',{},cust).verifiedCash,1500,'verified after Main Admin verifies the collection');
+ assert.ok(s.sheets.get('Audit_Log').rows.some(r=>r.includes('payment.leaderRecord')));
+});

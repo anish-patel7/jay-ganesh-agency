@@ -180,7 +180,7 @@ function appoint(req){getActor(req,'admin');return locked(()=>{
 function groupSummary(){const customers=all('Customers'),payments=all('Payments');return all('Groups').map(g=>{const members=customers.filter(c=>c.groupId===g.id);return {id:g.id,name:g.name,leaderCustomerId:g.leaderCustomerId,reference:g.reference,members:members.length,totalMonthlyEmi:members.reduce((s,c)=>s+Number(c.emi||0),0),verifiedCash:payments.filter(p=>p.status==='Verified'&&members.some(c=>c.id===p.customerId)).reduce((s,p)=>s+Number(p.amount||0),0)};});}
 function groupOfLeader(actor){const c=ownCustomer(actor),g=all('Groups').find(x=>x.leaderCustomerId===c.id);if(!g)fail('Not a current Group Leader','FORBIDDEN');return g;}
 function customerDashboard(req){const a=getActor(req,'customer'),c=ownCustomer(a),p=all('Payments').filter(x=>x.customerId===c.id);const verified=p.filter(x=>x.status==='Verified').reduce((sum,x)=>sum+Number(x.amount),0);const pack=Number(c.emi)*0.5;const firstPaid=p.filter(x=>x.status==='Verified'&&Number(x.installment)===1).reduce((sum,x)=>sum+Number(x.amount),0);const contribution=Math.max(0,verified-Math.min(pack,firstPaid));const fullyPaid=Array.from({length:9},(_,i)=>p.filter(x=>x.status==='Verified'&&Number(x.installment)===i+1).reduce((sum,x)=>sum+Number(x.amount),0)>=Number(c.emi)*(i===0?1.5:1)-0.001).every(Boolean);const bonus=fullyPaid&&c.bonusApproved==='true';return {customer:publicCustomer(c),payments:p.map(paymentView),verifiedCash:verified,verifiedContributions:contribution,bonusApproved:bonus,availableCredit:contribution+(bonus?Number(c.emi):0),group:c.groupId?all('Groups').find(x=>x.id===c.groupId)||null:null};}
-function paymentView(p){return {id:p.id,customerId:p.customerId,installment:Number(p.installment),amount:Number(p.amount),mode:p.mode,reference:p.reference,status:p.status,createdAt:p.createdAt};}
+function paymentView(p){return {id:p.id,customerId:p.customerId,installment:Number(p.installment),amount:Number(p.amount),mode:p.mode,reference:p.reference,status:p.status,createdAt:p.createdAt,recordedByLeader:String(p.submittedBy||'').indexOf('leader:')===0};}
 function submitPayment(req){allowPayment();const a=getActor(req,'customer');return locked(()=>{
  const c=ownCustomer(a);if(!c.groupId)fail('Wait for Main Admin to assign your group','CONFLICT');const g=one('Groups',c.groupId);if(!g||!g.leaderCustomerId)fail('Group Leader has not been appointed','CONFLICT');
  const installment=Number(req.installment),amount=money(req.amount),mode=safe(req.mode,20),reference=safe(req.reference,120);
@@ -203,6 +203,20 @@ function leaderQueue(req){
   payments:payments.map(p=>Object.assign(paymentView(p),{memberName:memberById[String(p.customerId)].name||'',isOwnPayment:String(p.customerId)===String(a.customerId)})),
   collections:all('Group_Collections').filter(x=>x.groupId===g.id).map(collectionView)};
 }
+/** Group Leader records an EMI payment they received from a member of their own group.
+ * Same amount rules as a customer entry. Because the leader took the money, it starts
+ * as 'Leader Verified' and goes into the next group collection for Main Admin to verify. */
+function leaderRecordPayment(req){allowPayment();const a=getActor(req,'leader');return locked(()=>{
+ const g=groupOfLeader(a),c=one('Customers',req.customerId);
+ if(!c||String(c.groupId)!==String(g.id))fail('You can record payments only for members of your own group','FORBIDDEN');
+ if(String(c.id)===String(a.customerId))fail('Record your own EMI under "Record my payment". It must go through Main Admin verification.','CONFLICT');
+ const installment=Number(req.installment),amount=money(req.amount),mode=safe(req.mode,20),reference=safe(req.reference,120);
+ if(!Number.isInteger(installment)||installment<1||installment>9||!['Cash','Online'].includes(mode))fail('Invalid installment or mode');
+ const due=Number(c.emi)*(installment===1?1.5:1),used=all('Payments').filter(x=>String(x.customerId)===String(c.id)&&Number(x.installment)===installment&&!['Leader Rejected','Rejected'].includes(x.status)).reduce((s,x)=>s+Number(x.amount),0);
+ if(Math.round((used+amount)*100)>Math.round(due*100))fail('Amount exceeds the remaining amount for installment '+installment+' (₹'+Math.max(0,due-used)+' left)','CONFLICT');
+ const now=stamp(),p={id:uid('PAY'),customerId:c.id,orderId:'',kind:'EMI',installment,amount,mode,recipientId:a.customerId,status:'Leader Verified',submittedBy:'leader:'+a.customerId,createdAt:now,reference,leaderApprovedBy:a.customerId,leaderApprovedAt:now,leaderRejectedAt:'',batchId:''};put('Payments',p);
+ audit(a.customerId,'payment.leaderRecord','Payments',p.id,null,{customerId:c.id,amount,installment,mode},'Recorded by Group Leader on behalf of member');return {paymentId:p.id,status:p.status};
+});}
 function reviewPayment(req,approve){allowGroupCollection();const a=getActor(req,'leader');return locked(()=>{
  const g=groupOfLeader(a),p=one('Payments',req.id),c=p&&one('Customers',p.customerId);if(!p||!c||c.groupId!==g.id||!['Awaiting Leader','Leader Self-Declared'].includes(p.status))fail('This payment is not awaiting your review','CONFLICT');
  if(String(p.customerId)===String(a.customerId))fail('You cannot approve your own payment. Add it to a group collection and let Main Admin verify the combined remittance.','FORBIDDEN');
@@ -281,6 +295,7 @@ function run(action,req){preflight();req.allowPinChange=action==='me'||action===
  case 'leader.rejectPayment':return reviewPayment(req,false);
  case 'leader.collection':return createCollection(req);
  case 'changePin':return changePin(req);
+ case 'leader.recordPayment':return leaderRecordPayment(req);
  case 'order.mine':return orderMine(req);
  case 'order.create':return orderCreate(req);
  case 'order.saveDraft':return orderSaveDraft(req);
